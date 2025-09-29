@@ -135,6 +135,9 @@
         </div>
         <div id="input-container">
             <input type="text" id="message-input" placeholder="请输入你的问题..." autocomplete="off">
+            <button id="mic-button" title="语音输入" style="padding:10px 15px;background:#4caf50;color:white;border:none;border-radius:5px;cursor:pointer;font-size:16px;">
+                <span id="mic-icon">🎤</span>
+            </button>
             <button id="send-button">发送</button>
             <button id="stop-button">停止思考</button>
         </div>
@@ -142,6 +145,7 @@
     </div>
 
     <script>
+        // 必须先声明socket，后续所有事件才能正常工作
         const socket = io();
         const chatContainer = document.getElementById('chat-container');
         const logContainer = document.getElementById('log-container');
@@ -150,6 +154,59 @@
         const clearButton = document.getElementById('clear-button');
         const stopButton = document.getElementById('stop-button');
         let currentMessageId = null;
+
+        // 语音识别相关
+        let isRecording = false;
+        let mediaRecorder;
+        let audioChunks = [];
+        const micButton = document.getElementById('mic-button');
+        const micIcon = document.getElementById('mic-icon');
+        micButton.addEventListener('click', async () => {
+            if (!isRecording) {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    alert('当前浏览器不支持录音功能');
+                    return;
+                }
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    mediaRecorder.ondataavailable = e => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
+                    };
+                    mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                        // 发送音频数据到后端
+                        const reader = new FileReader();
+                        reader.onload = function() {
+                            const base64Audio = reader.result.split(',')[1];
+                            socket.emit('asr_audio', { audio: base64Audio });
+                        };
+                        reader.readAsDataURL(audioBlob);
+                    };
+                    mediaRecorder.start();
+                    isRecording = true;
+                    micIcon.textContent = '⏹️';
+                    micButton.title = '点击停止录音';
+                } catch (err) {
+                    alert('无法访问麦克风: ' + err);
+                }
+            } else {
+                mediaRecorder.stop();
+                isRecording = false;
+                micIcon.textContent = '🎤';
+                micButton.title = '语音输入';
+            }
+        });
+        // 监听后端返回的语音识别结果
+        socket.on('asr_result', (data) => {
+            if (data && data.text) {
+                messageInput.value = data.text;
+                addMessage('语音识别: ' + data.text, 'log-message', logContainer);
+            } else {
+                addMessage('语音识别失败', 'log-message', logContainer);
+            }
+        });
 
         function addMessage(message, className, container) {
             const messageDiv = document.createElement('div');
@@ -230,8 +287,12 @@
         });
 
         socket.on('history_cleared', (data) => {
+            // 清空聊天区和日志区
+            chatContainer.innerHTML = '';
+            logContainer.innerHTML = '';
             addMessage(data.message, 'log-message', logContainer);
-            // 可选：清空聊天界面或者添加提示
+            // 可选：添加初始欢迎消息
+            addMessage('AI助手: 你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
         });
 
         // 添加初始欢迎消息

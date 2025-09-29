@@ -60,8 +60,47 @@ except Exception as e:
     print(f"故障预测模型加载失败: {e}")
 
 
-# ========== 配置区：通义千问Plus API Key ==========
-QWEN_API_KEY = ""
+
+# ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
+QWEN_API_KEY = ""  # 通义千问API Key
+ALI_ASR_API_KEY = ""  # 阿里云百炼API Key（必填）
+ALI_ASR_APPKEY = ""   # 阿里云ASR服务appkey（必填）
+
+# ========== 导入通义千问API和ASR封装 ========== 
+from qwen_api import get_qwen_response
+from ali_asr import ali_asr_recognize
+
+# ========== Flask Web 应用 ========== 
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key'
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# ========== 语音识别SocketIO事件 ==========
+@socketio.on('asr_audio')
+def handle_asr_audio(data):
+    """
+    data: { audio: base64字符串（不含data:前缀） }
+    """
+    audio_base64 = data.get('audio', None)
+    if not audio_base64:
+        socketio.emit('log_message', {'message': '[ASR] 未收到音频数据'})
+        emit('asr_result', {'text': '', 'error': '未收到音频数据'})
+        return
+    socketio.emit('log_message', {'message': f'[ASR] 收到音频数据，长度: {len(audio_base64)} 字节'})
+    if not ALI_ASR_API_KEY or not ALI_ASR_APPKEY:
+        socketio.emit('log_message', {'message': '[ASR] ASR配置缺失，请检查API Key和AppKey'})
+        emit('asr_result', {'text': '', 'error': 'ASR配置缺失'})
+        return
+    try:
+        text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, appkey=ALI_ASR_APPKEY)
+        if text:
+            socketio.emit('log_message', {'message': f'[ASR] 识别成功: {text}'})
+        else:
+            socketio.emit('log_message', {'message': '[ASR] 识别完成，但未返回文本'})
+        emit('asr_result', {'text': text})
+    except Exception as e:
+        socketio.emit('log_message', {'message': f'[ASR] 识别异常: {e}'})
+        emit('asr_result', {'text': '', 'error': str(e)})
 
 # ========== 导入通义千问API封装 ==========
 from qwen_api import get_qwen_response
