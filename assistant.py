@@ -1,3 +1,23 @@
+import websocket
+import hashlib
+import base64
+import hmac
+import json
+import time
+import pyttsx3
+from datetime import datetime, timezone
+from urllib.parse import urlencode
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit
+import threading
+import asyncio
+
+# ========== 故障预测模型相关 ========== 
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+
 def initial_predict():
     global latest_sim_predict
     try:
@@ -22,25 +42,6 @@ def initial_predict():
             print(f'机床{machine_id}初始推理完成，结果：{msg}')
     except Exception as e:
         print(f'初始推理异常: {e}')
-import websocket
-import hashlib
-import base64
-import hmac
-import json
-import time
-import pyttsx3
-from datetime import datetime, timezone
-from urllib.parse import urlencode
-from flask import Flask, render_template, request, jsonify
-from flask_socketio import SocketIO, emit
-import threading
-import asyncio
-
-# ========== 故障预测模型相关 ========== 
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from sklearn.preprocessing import MinMaxScaler
 
 # 加载模型和归一化器（全局只加载一次）
 try:
@@ -58,10 +59,12 @@ except Exception as e:
     scaler = None
     print(f"故障预测模型加载失败: {e}")
 
-# ========== 配置区：请务必确认你在讯飞平台获取的以下信息正确 ==========
-APPID = "bf9978b7"           # 替换为你的真实 APPID（在控制台项目中查看）
-APIKey = "d82430ad7a52eec5c133470dd68c5aec"     # 接口密钥中的 API Key
-APISecret = "ZjZkNTIwNTZmNzYyYmYxMTgxY2U1YTMz"  # 接口密钥中的 API Secret
+
+# ========== 配置区：通义千问Plus API Key ==========
+QWEN_API_KEY = ""
+
+# ========== 导入通义千问API封装 ==========
+from qwen_api import get_qwen_response
 
 # ========== 初始化语音引擎 ==========
 engine = pyttsx3.init()
@@ -78,14 +81,11 @@ conversation_history = []
 latest_sim_predict = {}  # {machine_id: 推理结果字符串}
 
 # ========== Flask Web 应用 ==========
-
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ========== 接收模拟信号并自动预测 ==========
-
 @socketio.on('simulated_signal')
 def handle_simulated_signal(data):
     """
@@ -167,47 +167,10 @@ def start_tts_loop():
     asyncio.set_event_loop(tts_loop)
     tts_loop.run_forever()
 
-def get_spark_response(question):
-    global response_data, received_response, conversation_history
-    response_data = ""
-    received_response = False
 
-    # --- 请求配置 ---
-    host = "spark-api.xf-yun.com"
-    path = "/v1.1/chat"
-    url = f"wss://{host}{path}"
-
-    # --- 当前 UTC 时间（GMT 格式）---
-    now = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
-
-    # --- 构造 signature_origin 字符串（注意换行和空格）---
-    signature_origin = f"host: {host}\ndate: {now}\nGET {path} HTTP/1.1"
-
-    # --- 计算 HMAC-SHA256 签名 ---
-    signature_sha = hmac.new(
-        APISecret.encode('utf-8'),
-        signature_origin.encode('utf-8'),
-        digestmod=hashlib.sha256
-    ).digest()
-    signature_b64 = base64.b64encode(signature_sha).decode('utf-8')
-
-    # --- 构造 authorization 头字段（字符串形式）---
-    authorization_str = f'api_key="{APIKey}", algorithm="hmac-sha256", headers="host date request-line", signature="{signature_b64}"'
-
-    # --- 将 authorization 字符串 Base64 编码作为 URL 参数 ---
-    authorization_enc = base64.b64encode(authorization_str.encode('utf-8')).decode('utf-8')
-
-    # --- 构造最终请求 URL ---
-    params = {
-        "host": host,
-        "date": now,
-        "authorization": authorization_enc
-    }
-    request_url = f"{url}?{urlencode(params)}"
-    print("请求URL已生成")
-    socketio.emit('log_message', {'message': '请求URL已生成'})
-
-    # --- 准备发送的数据 ---
+# ========== 通义千问Plus对话API ==========
+def get_llm_response(question):
+    global conversation_history
     # 汇总所有机床的最新推理结果
     if latest_sim_predict:
         sim_info = "\n【各机床最新实时信号预测】\n" + "\n".join([
@@ -221,100 +184,18 @@ def get_spark_response(question):
 请用*简洁、专业、尽量口语化*的中文回答用户问题，并给出必要的建议，如及时安排检修等。{sim_info}
 \n用户问题：{question}
 """
-
-    # 添加当前问题到对话历史
     conversation_history.append({"role": "user", "content": prompt})
-    
-    # 限制对话历史长度，防止超出token限制
-    if len(conversation_history) > 10:  # 保留最近5轮对话
+    if len(conversation_history) > 10:
         conversation_history = conversation_history[-10:]
-
-    data = {
-        "header": {"app_id": APPID},
-        "parameter": {
-            "chat": {
-                "domain": "lite",
-                "temperature": 0.5,
-                "max_tokens": 2048
-            }
-        },
-        "payload": {
-            "message": {
-                "text": conversation_history
-            }
-        }
-    }
-
-    # --- WebSocket 回调函数 ---
-    def on_message(ws, message):
-        global response_data, received_response
-        try:
-            msg = json.loads(message)
-            code = msg["header"]["code"]
-            if code != 0:
-                print(f"API 返回错误码 {code}: {msg['header']['message']}")
-                socketio.emit('log_message', {'message': f"API 返回错误码 {code}: {msg['header']['message']}"})
-                response_data = "抱歉，服务端返回错误。"
-                socketio.emit('ai_response', {'message': response_data})
-                received_response = True
-                ws.close()
-                return
-
-            # 获取回复内容
-            content = msg["payload"]["choices"]["text"][0]["content"]
-            response_data += content
-            socketio.emit('ai_response_update', {'message': content})
-
-            # 判断是否是最后一帧（status == 2 表示结束）
-            if msg["header"]["status"] == 2:
-                print("\n🔚 AI 回复接收完成。")
-                socketio.emit('log_message', {'message': 'AI 回复接收完成'})
-                # 将AI回复添加到对话历史
-                conversation_history.append({"role": "assistant", "content": response_data})
-                received_response = True
-                ws.close()
-
-        except Exception as e:
-            print("解析消息失败:", e)
-            socketio.emit('log_message', {'message': f"解析消息失败: {e}"})
-            response_data = "解析响应失败。"
-            socketio.emit('ai_response', {'message': response_data})
-            received_response = True
-            ws.close()
-
-    def on_error(ws, error):
-        print("WebSocket 错误:", error)
-        socketio.emit('log_message', {'message': f"WebSocket 错误: {error}"})
-        ws.close()
-
-    def on_close(ws, close_status_code, close_msg):
-        print("WebSocket 连接已关闭")
-        socketio.emit('log_message', {'message': "WebSocket 连接已关闭"})
-
-    def on_open(ws):
-        print("WebSocket 连接成功，正在发送问题...")
-        socketio.emit('log_message', {'message': 'WebSocket 连接成功，正在发送问题...'})
-        ws.send(json.dumps(data))
-
-    # --- 建立 WebSocket 连接 ---
-    print("正在连接星火大模型 API...")
-    socketio.emit('log_message', {'message': '正在连接星火大模型 API...'})
-    ws = websocket.WebSocketApp(
-        request_url,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws.run_forever(ping_interval=6, ping_timeout=3)  # 自动保活
-
-    # --- 等待响应完成 ---
-    while not received_response:
-        time.sleep(0.1)
-
-    print(f"AI回答: {response_data}")
-    socketio.emit('ai_response', {'message': response_data})
-    return response_data
+    try:
+        reply = get_qwen_response(question=prompt, history=conversation_history[:-1], apikey=QWEN_API_KEY)
+        conversation_history.append({"role": "assistant", "content": reply})
+        socketio.emit('ai_response', {'message': reply})
+        return reply
+    except Exception as e:
+        err = f"[通义千问API调用失败] {e}"
+        socketio.emit('ai_response', {'message': err})
+        return err
 
 
 # ========== 文本转语音函数 ==========
@@ -411,7 +292,7 @@ def handle_message(data):
         speak_text("抱歉，我暂时无法连接服务器。")
 
 def process_ai_response(user_input):
-    ai_reply = get_spark_response(user_input)
+    ai_reply = get_llm_response(user_input)
     speak_text(ai_reply)
 
 
@@ -461,7 +342,6 @@ def handle_clear_history():
 if __name__ == "__main__":
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
-    initial_predict()
     # 初始化TTS事件循环
     init_tts_loop()
     socketio.run(app, debug=True, host='0.0.0.0')
