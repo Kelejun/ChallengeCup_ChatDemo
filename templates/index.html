@@ -110,6 +110,19 @@
         #clear-button:hover {
             background-color: #f57c00;
         }
+        #stop-button {
+            padding: 10px 20px;
+            background-color: #f44336;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            display: none;
+        }
+        #stop-button:hover {
+            background-color: #d32f2f;
+        }
     </style>
 </head>
 <body>
@@ -123,6 +136,7 @@
         <div id="input-container">
             <input type="text" id="message-input" placeholder="请输入你的问题..." autocomplete="off">
             <button id="send-button">发送</button>
+            <button id="stop-button">停止思考</button>
         </div>
         <button id="clear-button">清空对话历史</button>
     </div>
@@ -134,6 +148,8 @@
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
         const clearButton = document.getElementById('clear-button');
+        const stopButton = document.getElementById('stop-button');
+        let currentMessageId = null;
 
         function addMessage(message, className, container) {
             const messageDiv = document.createElement('div');
@@ -163,9 +179,11 @@
             const message = messageInput.value.trim();
             if (message) {
                 addMessage('你: ' + message, 'user-message', chatContainer);
-                socket.emit('send_message', {message: message});
+                currentMessageId = Date.now().toString(); // 生成唯一ID
+                socket.emit('send_message', {message: message, id: currentMessageId});
                 messageInput.value = '';
                 sendButton.disabled = true;
+                stopButton.style.display = 'block';
                 addTypingIndicator();
             }
         });
@@ -180,10 +198,19 @@
             socket.emit('clear_history');
         });
 
+        stopButton.addEventListener('click', () => {
+            if (currentMessageId) {
+                socket.emit('stop_generation', {id: currentMessageId});
+                stopButton.style.display = 'none';
+            }
+        });
+
         socket.on('ai_response', (data) => {
             removeTypingIndicator();
             addMessage('AI助手: ' + data.message, 'ai-message', chatContainer);
             sendButton.disabled = false;
+            stopButton.style.display = 'none';
+            currentMessageId = null;
         });
 
         socket.on('ai_response_update', (data) => {
@@ -192,6 +219,14 @@
 
         socket.on('log_message', (data) => {
             addMessage(data.message, 'log-message', logContainer);
+        });
+
+        socket.on('generation_stopped', (data) => {
+            removeTypingIndicator();
+            addMessage('AI助手: [思考已中断]', 'ai-message', chatContainer);
+            sendButton.disabled = false;
+            stopButton.style.display = 'none';
+            currentMessageId = null;
         });
 
         socket.on('history_cleared', (data) => {
