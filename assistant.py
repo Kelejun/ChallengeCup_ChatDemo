@@ -7,6 +7,9 @@ import time
 import pyttsx3
 from datetime import datetime, timezone
 from urllib.parse import urlencode
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit
+import threading
 
 # ========== 配置区：请务必确认你在讯飞平台获取的以下信息正确 ==========
 APPID = "bf9978b7"           # 替换为你的真实 APPID（在控制台项目中查看）
@@ -22,6 +25,10 @@ engine.setProperty('volume', 0.9)    # 音量
 response_data = ""
 received_response = False
 
+# ========== Flask Web 应用 ==========
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key'
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 def get_spark_response(question):
     global response_data, received_response
@@ -61,6 +68,7 @@ def get_spark_response(question):
     }
     request_url = f"{url}?{urlencode(params)}"
     print("请求URL已生成")
+    socketio.emit('log_message', {'message': '请求URL已生成'})
 
     # --- 准备发送的数据 ---
     prompt = f"""你是一个智能数控机床运维专家，请用简洁、专业、口语化的中文回答用户问题。
@@ -98,7 +106,9 @@ def get_spark_response(question):
             code = msg["header"]["code"]
             if code != 0:
                 print(f"API 返回错误码 {code}: {msg['header']['message']}")
+                socketio.emit('log_message', {'message': f"API 返回错误码 {code}: {msg['header']['message']}"})
                 response_data = "抱歉，服务端返回错误。"
+                socketio.emit('ai_response', {'message': response_data})
                 received_response = True
                 ws.close()
                 return
@@ -106,32 +116,40 @@ def get_spark_response(question):
             # 获取回复内容
             content = msg["payload"]["choices"]["text"][0]["content"]
             response_data += content
+            socketio.emit('ai_response_update', {'message': content})
 
             # 判断是否是最后一帧（status == 2 表示结束）
             if msg["header"]["status"] == 2:
                 print("\n🔚 AI 回复接收完成。")
+                socketio.emit('log_message', {'message': 'AI 回复接收完成'})
                 received_response = True
                 ws.close()
 
         except Exception as e:
             print("解析消息失败:", e)
+            socketio.emit('log_message', {'message': f"解析消息失败: {e}"})
             response_data = "解析响应失败。"
+            socketio.emit('ai_response', {'message': response_data})
             received_response = True
             ws.close()
 
     def on_error(ws, error):
         print("WebSocket 错误:", error)
+        socketio.emit('log_message', {'message': f"WebSocket 错误: {error}"})
         ws.close()
 
     def on_close(ws, close_status_code, close_msg):
         print("WebSocket 连接已关闭")
+        socketio.emit('log_message', {'message': "WebSocket 连接已关闭"})
 
     def on_open(ws):
         print("WebSocket 连接成功，正在发送问题...")
+        socketio.emit('log_message', {'message': 'WebSocket 连接成功，正在发送问题...'})
         ws.send(json.dumps(data))
 
     # --- 建立 WebSocket 连接 ---
     print("正在连接星火大模型 API...")
+    socketio.emit('log_message', {'message': '正在连接星火大模型 API...'})
     ws = websocket.WebSocketApp(
         request_url,
         on_open=on_open,
@@ -146,6 +164,7 @@ def get_spark_response(question):
         time.sleep(0.1)
 
     print(f"AI回答: {response_data}")
+    socketio.emit('ai_response', {'message': response_data})
     return response_data
 
 
@@ -153,33 +172,48 @@ def get_spark_response(question):
 def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
+        socketio.emit('log_message', {'message': f"AI正在说: {text}"})
         engine.say(text)
         engine.runAndWait()
     else:
         print("没有内容可朗读")
+        socketio.emit('log_message', {'message': "没有内容可朗读"})
 
+
+# ========== Flask 路由 ==========
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@socketio.on('send_message')
+def handle_message(data):
+    user_input = data['message']
+    
+    if not user_input:
+        emit('log_message', {'message': "输入不能为空，请重新输入。"})
+        return
+
+    if "退出" in user_input or "再见" in user_input:
+        emit('ai_response', {'message': "好的，再见！"})
+        speak_text("好的，再见！")
+        return
+
+    try:
+        # 在新线程中处理AI响应，避免阻塞WebSocket
+        thread = threading.Thread(target=process_ai_response, args=(user_input,))
+        thread.start()
+    except Exception as e:
+        print("程序出错:", e)
+        emit('log_message', {'message': f"程序出错: {e}"})
+        emit('ai_response', {'message': "抱歉，我暂时无法连接服务器。"})
+        speak_text("抱歉，我暂时无法连接服务器。")
+
+def process_ai_response(user_input):
+    ai_reply = get_spark_response(user_input)
+    speak_text(ai_reply)
 
 # ========== 主程序入口 ==========
 if __name__ == "__main__":
     print("=== 数控机床AI语音助手已启动 ===")
-    print("提示：输入‘退出’可结束程序\n")
-
-    while True:
-        user_input = input("请输入你的问题 > ").strip()
-
-        if not user_input:
-            print("输入不能为空，请重新输入。")
-            continue
-
-        if "退出" in user_input or "再见" in user_input:
-            speak_text("好的，再见！")
-            break
-
-        try:
-            ai_reply = get_spark_response(user_input)
-            speak_text(ai_reply)
-        except Exception as e:
-            print("程序出错:", e)
-            speak_text("抱歉，我暂时无法连接服务器。")
-
-    print("程序已退出，欢迎下次使用！")
+    print("提示：访问 http://localhost:5000 使用网页版")
+    socketio.run(app, debug=True, host='0.0.0.0')
