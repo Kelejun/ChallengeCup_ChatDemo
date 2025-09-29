@@ -10,7 +10,6 @@ from urllib.parse import urlencode
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
-import asyncio
 
 # ========== 配置区：请务必确认你在讯飞平台获取的以下信息正确 ==========
 APPID = "bf9978b7"           # 替换为你的真实 APPID（在控制台项目中查看）
@@ -18,9 +17,15 @@ APIKey = "d82430ad7a52eec5c133470dd68c5aec"     # 接口密钥中的 API Key
 APISecret = "ZjZkNTIwNTZmNzYyYmYxMTgxY2U1YTMz"  # 接口密钥中的 API Secret
 
 # ========== 初始化语音引擎 ==========
-engine = pyttsx3.init()
-engine.setProperty('rate', 180)      # 语速
-engine.setProperty('volume', 0.9)    # 音量
+# 使用线程锁来确保TTS引擎的线程安全
+tts_lock = threading.Lock()
+
+def get_tts_engine():
+    """获取TTS引擎实例，每次创建新实例避免冲突"""
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 180)      # 语速
+    engine.setProperty('volume', 0.9)    # 音量
+    return engine
 
 # 全局变量用于接收响应
 response_data = ""
@@ -33,22 +38,6 @@ conversation_history = []
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*")
-
-# 创建一个全局事件循环用于TTS
-tts_loop = None
-tts_thread = None
-
-def init_tts_loop():
-    """初始化TTS事件循环"""
-    global tts_loop, tts_thread
-    tts_loop = asyncio.new_event_loop()
-    tts_thread = threading.Thread(target=start_tts_loop, daemon=True)
-    tts_thread.start()
-
-def start_tts_loop():
-    """在新线程中运行TTS事件循环"""
-    asyncio.set_event_loop(tts_loop)
-    tts_loop.run_forever()
 
 def get_spark_response(question):
     global response_data, received_response, conversation_history
@@ -200,18 +189,31 @@ def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
         socketio.emit('log_message', {'message': f"AI正在说: {text}"})
-        # 使用自定义事件循环来避免事件循环冲突
-        def _speak():
-            engine.say(text)
-            engine.runAndWait()
         
-        # 将任务提交到专门的TTS事件循环中执行
-        # 修改: 直接使用已创建的tts_loop，避免在子线程中获取事件循环
-        if tts_loop:
-            # 使用 call_soon_threadsafe 在 TTS 线程中执行语音播放
-            tts_loop.call_soon_threadsafe(lambda: _speak())
-        else:
-            # 如果 tts_loop 还未初始化，则在当前线程直接播放
+        def _speak():
+            try:
+                # 在独立线程中创建新的TTS引擎实例，避免事件循环冲突
+                with tts_lock:  # 使用锁确保线程安全
+                    engine = get_tts_engine()
+                    engine.say(text)
+                    engine.runAndWait()
+                    # 主动停止引擎释放资源
+                    engine.stop()
+                print("TTS播放完成")
+                socketio.emit('log_message', {'message': "TTS播放完成"})
+            except Exception as e:
+                print(f"TTS播放出错: {e}")
+                socketio.emit('log_message', {'message': f"TTS播放出错: {e}"})
+        
+        # 简化TTS执行逻辑，直接在新线程中播放
+        # 避免复杂的异步事件循环嵌套
+        try:
+            tts_thread = threading.Thread(target=_speak, daemon=True)
+            tts_thread.start()
+        except Exception as e:
+            print(f"创建TTS线程失败: {e}")
+            socketio.emit('log_message', {'message': f"创建TTS线程失败: {e}"})
+            # 如果线程创建失败，直接在当前线程执行
             _speak()
     else:
         print("没有内容可朗读")
@@ -270,6 +272,12 @@ def handle_clear_history():
 if __name__ == "__main__":
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
-    # 初始化TTS事件循环
-    init_tts_loop()
-    socketio.run(app, debug=True, host='0.0.0.0')
+    try:
+        socketio.run(app, debug=True, host='0.0.0.0')
+    except SystemExit:
+        # 正常退出，不处理
+        pass
+    except KeyboardInterrupt:
+        print("程序被用户中断")
+    except Exception as e:
+        print(f"程序运行出错: {e}")
