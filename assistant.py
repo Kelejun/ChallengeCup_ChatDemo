@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
+import asyncio
 
 # ========== 配置区：请务必确认你在讯飞平台获取的以下信息正确 ==========
 APPID = "bf9978b7"           # 替换为你的真实 APPID（在控制台项目中查看）
@@ -25,13 +26,32 @@ engine.setProperty('volume', 0.9)    # 音量
 response_data = ""
 received_response = False
 
+# ========== 存储对话历史 ==========
+conversation_history = []
+
 # ========== Flask Web 应用 ==========
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# 创建一个全局事件循环用于TTS
+tts_loop = None
+tts_thread = None
+
+def init_tts_loop():
+    """初始化TTS事件循环"""
+    global tts_loop, tts_thread
+    tts_loop = asyncio.new_event_loop()
+    tts_thread = threading.Thread(target=start_tts_loop, daemon=True)
+    tts_thread.start()
+
+def start_tts_loop():
+    """在新线程中运行TTS事件循环"""
+    asyncio.set_event_loop(tts_loop)
+    tts_loop.run_forever()
+
 def get_spark_response(question):
-    global response_data, received_response
+    global response_data, received_response, conversation_history
     response_data = ""
     received_response = False
 
@@ -80,6 +100,13 @@ def get_spark_response(question):
 用户问题：{question}
 """
 
+    # 添加当前问题到对话历史
+    conversation_history.append({"role": "user", "content": prompt})
+    
+    # 限制对话历史长度，防止超出token限制
+    if len(conversation_history) > 10:  # 保留最近5轮对话
+        conversation_history = conversation_history[-10:]
+
     data = {
         "header": {"app_id": APPID},
         "parameter": {
@@ -91,9 +118,7 @@ def get_spark_response(question):
         },
         "payload": {
             "message": {
-                "text": [
-                    {"role": "user", "content": prompt}
-                ]
+                "text": conversation_history
             }
         }
     }
@@ -122,6 +147,8 @@ def get_spark_response(question):
             if msg["header"]["status"] == 2:
                 print("\n🔚 AI 回复接收完成。")
                 socketio.emit('log_message', {'message': 'AI 回复接收完成'})
+                # 将AI回复添加到对话历史
+                conversation_history.append({"role": "assistant", "content": response_data})
                 received_response = True
                 ws.close()
 
@@ -173,8 +200,19 @@ def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
         socketio.emit('log_message', {'message': f"AI正在说: {text}"})
-        engine.say(text)
-        engine.runAndWait()
+        # 使用自定义事件循环来避免事件循环冲突
+        def _speak():
+            engine.say(text)
+            engine.runAndWait()
+        
+        # 将任务提交到专门的TTS事件循环中执行
+        # 修改: 直接使用已创建的tts_loop，避免在子线程中获取事件循环
+        if tts_loop:
+            # 使用 call_soon_threadsafe 在 TTS 线程中执行语音播放
+            tts_loop.call_soon_threadsafe(lambda: _speak())
+        else:
+            # 如果 tts_loop 还未初始化，则在当前线程直接播放
+            _speak()
     else:
         print("没有内容可朗读")
         socketio.emit('log_message', {'message': "没有内容可朗读"})
@@ -196,6 +234,9 @@ def handle_message(data):
     if "退出" in user_input or "再见" in user_input:
         emit('ai_response', {'message': "好的，再见！"})
         speak_text("好的，再见！")
+        # 清空对话历史
+        global conversation_history
+        conversation_history = []
         return
 
     try:
@@ -212,8 +253,23 @@ def process_ai_response(user_input):
     ai_reply = get_spark_response(user_input)
     speak_text(ai_reply)
 
+# 添加清除历史记录的路由
+@app.route('/clear_history', methods=['POST'])
+def clear_history():
+    global conversation_history
+    conversation_history = []
+    return jsonify({'status': 'success'})
+
+@socketio.on('clear_history')
+def handle_clear_history():
+    global conversation_history
+    conversation_history = []
+    emit('history_cleared', {'message': '对话历史已清除'})
+
 # ========== 主程序入口 ==========
 if __name__ == "__main__":
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
+    # 初始化TTS事件循环
+    init_tts_loop()
     socketio.run(app, debug=True, host='0.0.0.0')

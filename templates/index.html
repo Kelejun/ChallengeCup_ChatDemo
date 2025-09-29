@@ -64,6 +64,7 @@
         #input-container {
             display: flex;
             gap: 10px;
+            margin-bottom: 10px;
         }
         #message-input {
             flex: 1;
@@ -97,6 +98,18 @@
             margin-bottom: 5px;
             color: #333;
         }
+        #clear-button {
+            padding: 8px 15px;
+            background-color: #ff9800;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        #clear-button:hover {
+            background-color: #f57c00;
+        }
     </style>
 </head>
 <body>
@@ -111,6 +124,7 @@
             <input type="text" id="message-input" placeholder="请输入你的问题..." autocomplete="off">
             <button id="send-button">发送</button>
         </div>
+        <button id="clear-button">清空对话历史</button>
     </div>
 
     <script>
@@ -119,6 +133,7 @@
         const logContainer = document.getElementById('log-container');
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
+        const clearButton = document.getElementById('clear-button');
 
         function addMessage(message, className, container) {
             const messageDiv = document.createElement('div');
@@ -161,6 +176,10 @@
             }
         });
 
+        clearButton.addEventListener('click', () => {
+            socket.emit('clear_history');
+        });
+
         socket.on('ai_response', (data) => {
             removeTypingIndicator();
             addMessage('AI助手: ' + data.message, 'ai-message', chatContainer);
@@ -173,6 +192,11 @@
 
         socket.on('log_message', (data) => {
             addMessage(data.message, 'log-message', logContainer);
+        });
+
+        socket.on('history_cleared', (data) => {
+            addMessage(data.message, 'log-message', logContainer);
+            // 可选：清空聊天界面或者添加提示
         });
 
         // 添加初始欢迎消息
