@@ -24,13 +24,24 @@
             color: #333;
         }
         #chat-container {
-            height: 400px;
+            height: 300px;
             border: 1px solid #ddd;
             border-radius: 5px;
             padding: 10px;
             margin-bottom: 20px;
             overflow-y: auto;
             background-color: #fafafa;
+        }
+        #log-container {
+            height: 100px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 20px;
+            overflow-y: auto;
+            background-color: #fafafa;
+            font-size: 0.9em;
+            color: #666;
         }
         .message {
             margin-bottom: 10px;
@@ -46,8 +57,9 @@
         }
         .log-message {
             background-color: #fff3e0;
-            font-size: 0.9em;
-            color: #666;
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
         }
         #input-container {
             display: flex;
@@ -80,12 +92,21 @@
             color: #999;
             font-style: italic;
         }
+        .section-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>数控机床AI语音助手</h1>
         <div id="chat-container"></div>
+        <div>
+            <div class="section-title">系统日志:</div>
+            <div id="log-container"></div>
+        </div>
         <div id="input-container">
             <input type="text" id="message-input" placeholder="请输入你的问题..." autocomplete="off">
             <button id="send-button">发送</button>
@@ -95,15 +116,16 @@
     <script>
         const socket = io();
         const chatContainer = document.getElementById('chat-container');
+        const logContainer = document.getElementById('log-container');
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
 
-        function addMessage(message, className) {
+        function addMessage(message, className, container) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${className}`;
             messageDiv.textContent = message;
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
         }
 
         function addTypingIndicator() {
@@ -125,7 +147,7 @@
         sendButton.addEventListener('click', () => {
             const message = messageInput.value.trim();
             if (message) {
-                addMessage('你: ' + message, 'user-message');
+                addMessage('你: ' + message, 'user-message', chatContainer);
                 socket.emit('send_message', {message: message});
                 messageInput.value = '';
                 sendButton.disabled = true;
@@ -141,7 +163,7 @@
 
         socket.on('ai_response', (data) => {
             removeTypingIndicator();
-            addMessage('AI助手: ' + data.message, 'ai-message');
+            addMessage('AI助手: ' + data.message, 'ai-message', chatContainer);
             sendButton.disabled = false;
         });
 
@@ -150,11 +172,11 @@
         });
 
         socket.on('log_message', (data) => {
-            addMessage('日志: ' + data.message, 'log-message');
+            addMessage(data.message, 'log-message', logContainer);
         });
 
         // 添加初始欢迎消息
-        addMessage('AI助手: 你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message');
+        addMessage('AI助手: 你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
     </script>
 </body>
 </html>
