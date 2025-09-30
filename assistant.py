@@ -12,7 +12,15 @@ from flask_socketio import SocketIO, emit
 
 import threading
 import asyncio
-import queue
+import os
+from typing import Optional
+from multiprocessing import Process, Queue, freeze_support
+from multiprocessing.queues import Queue as MPQueue
+
+# ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
+QWEN_API_KEY = ""  # 通义千问API Key
+ALI_ASR_API_KEY = ""  # 阿里云百炼API Key（必填）
+ALI_ASR_APPKEY = ""   # 阿里云ASR服务appkey（必填）
 
 # ========== 提前初始化Flask和SocketIO，确保后续所有@socketio.on可用 ==========
 app = Flask(__name__)
@@ -22,7 +30,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # ========== 故障预测模型相关 ========== 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import load_model
+from tensorflow.keras.models import load_model # type: ignore
 from sklearn.preprocessing import MinMaxScaler
 
 def initial_predict():
@@ -65,13 +73,6 @@ except Exception as e:
     fault_model = None
     scaler = None
     print(f"故障预测模型加载失败: {e}")
-
-
-
-# ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
-QWEN_API_KEY = ""  # 通义千问API Key
-ALI_ASR_API_KEY = ""  # 阿里云百炼API Key（必填）
-ALI_ASR_APPKEY = ""   # 阿里云ASR服务appkey（必填）
 
 # ========== 导入通义千问API和ASR封装 ========== 
 from qwen_api import get_qwen_response
@@ -153,26 +154,51 @@ def handle_simulated_signal(data):
         emit('sim_predict_result', {'result': f'模拟数据预测出错: {e}'})
 
 
-# ========== TTS 队列与线程 ==========
-tts_queue = queue.Queue()
-def tts_worker():
+# ========== TTS 多进程 ==========
+tts_queue: Optional[MPQueue] = None
+tts_process: Optional[Process] = None
+
+def tts_process_main(q: Queue, rate: int, volume: float):
+    # 子进程循环：每条文本都新建一次引擎，避免状态残留导致后续不发声
     while True:
-        text = tts_queue.get()
+        try:
+            text = q.get()
+        except Exception:
+            continue
         if text is None:
             break
         try:
-            # 每次都新建pyttsx3实例，彻底避免多线程/状态冲突
             engine = pyttsx3.init()
-            engine.setProperty('rate', TTS_RATE)
-            engine.setProperty('volume', TTS_VOLUME)
+            engine.setProperty('rate', rate)
+            engine.setProperty('volume', volume)
             engine.say(text)
             engine.runAndWait()
-            del engine
         except Exception as e:
             print(f"TTS朗读异常: {e}")
-        tts_queue.task_done()
-tts_thread = threading.Thread(target=tts_worker, daemon=True)
-tts_thread.start()
+        finally:
+            try:
+                # 显式销毁引用，帮助释放底层资源
+                del engine
+            except Exception:
+                pass
+
+def start_tts_process():
+    global tts_queue, tts_process
+    if tts_process and tts_process.is_alive():
+        return
+    tts_queue = Queue()
+    tts_process = Process(target=tts_process_main, args=(tts_queue, TTS_RATE, TTS_VOLUME), daemon=True)
+    tts_process.start()
+
+def stop_tts_process():
+    global tts_queue, tts_process
+    try:
+        if tts_queue:
+            tts_queue.put(None)
+    except Exception:
+        pass
+    if tts_process and tts_process.is_alive():
+        tts_process.join(timeout=1)
 
 
 # ========== 通义千问Plus对话API ==========
@@ -210,7 +236,24 @@ def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
         socketio.emit('log_message', {'message': f"AI正在说: {text}"})
-        tts_queue.put(text)
+        # 将文本发送到TTS进程；若进程未启动则尝试降级为本进程朗读
+        try:
+            # 若TTS进程异常退出，尝试自动重启
+            global tts_process
+            if tts_process is None or (tts_process is not None and not tts_process.is_alive()):
+                start_tts_process()
+                socketio.emit('log_message', {'message': '[TTS] 子进程已重启'})
+            if tts_queue is not None:
+                tts_queue.put(text)
+            else:
+                # 降级：本进程直接朗读（可能阻塞，尽量避免）
+                engine = pyttsx3.init()
+                engine.setProperty('rate', TTS_RATE)
+                engine.setProperty('volume', TTS_VOLUME)
+                engine.say(text)
+                engine.runAndWait()
+        except Exception as e:
+            print(f"TTS队列发送失败，降级播放异常: {e}")
     else:
         print("没有内容可朗读")
         socketio.emit('log_message', {'message': "没有内容可朗读"})
@@ -324,6 +367,13 @@ def handle_clear_history():
 
 # ========== 主程序入口 ==========
 if __name__ == "__main__":
+    freeze_support()  # Windows/PyInstaller 兼容
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
-    socketio.run(app, debug=True, host='0.0.0.0')
+    debug_flag = True
+    # 禁用自动重载器，确保仅运行一次，避免依赖 WERKZEUG_RUN_MAIN
+    start_tts_process()
+    try:
+        socketio.run(app, debug=debug_flag, host='0.0.0.0', use_reloader=False)
+    finally:
+        stop_tts_process()
