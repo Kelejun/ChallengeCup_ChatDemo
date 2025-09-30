@@ -9,8 +9,15 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
+
 import threading
 import asyncio
+import queue
+
+# ========== 提前初始化Flask和SocketIO，确保后续所有@socketio.on可用 ==========
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # ========== 故障预测模型相关 ========== 
 import numpy as np
@@ -70,10 +77,7 @@ ALI_ASR_APPKEY = ""   # 阿里云ASR服务appkey（必填）
 from qwen_api import get_qwen_response
 from ali_asr import ali_asr_recognize
 
-# ========== Flask Web 应用 ========== 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+
 
 # ========== 语音识别SocketIO事件 ==========
 @socketio.on('asr_audio')
@@ -105,10 +109,10 @@ def handle_asr_audio(data):
 # ========== 导入通义千问API封装 ==========
 from qwen_api import get_qwen_response
 
-# ========== 初始化语音引擎 ==========
-engine = pyttsx3.init()
-engine.setProperty('rate', 180)      # 语速
-engine.setProperty('volume', 0.9)    # 音量
+
+# ========== 语音参数 ========== 
+TTS_RATE = 180
+TTS_VOLUME = 0.9
 
 # 全局变量用于接收响应
 response_data = ""
@@ -118,48 +122,6 @@ received_response = False
 conversation_history = []
 # 存储最近一次模拟推送的预测结果
 latest_sim_predict = {}  # {machine_id: 推理结果字符串}
-
-# ========== Flask Web 应用 ==========
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'
-socketio = SocketIO(app, cors_allowed_origins="*")
-
-# ========== 接收模拟信号并自动预测 ==========
-@socketio.on('simulated_signal')
-def handle_simulated_signal(data):
-    """
-    data: { 'machine_id': int, 'signal': [...], 'label': 'normal'|'fault' }
-    """
-    global latest_sim_predict
-    machine_id = data.get('machine_id', None)
-    signal = data.get('signal', None)
-    label = data.get('label', '')
-    socketio.emit('log_message', {'message': f"收到机床{machine_id}推送数据，标签：{label}，长度：{len(signal) if signal else 0}"})
-    if fault_model is None or scaler is None:
-        socketio.emit('log_message', {'message': '模型未加载，无法预测'})
-        emit('fault_result', {'result': '模型未加载，无法预测'})
-        return
-    try:
-        if signal is None or not isinstance(signal, list) or len(signal) < 200:
-            socketio.emit('log_message', {'message': f'机床{machine_id}数据长度不足200，跳过'})
-            emit('fault_result', {'result': '模拟数据长度不足200'})
-            return
-        socketio.emit('log_message', {'message': f'机床{machine_id}数据归一化并准备推理...'})
-        sig_arr = np.array(signal).reshape(-1, 1)
-        sig_scaled = scaler.transform(sig_arr).flatten()
-        seq = sig_scaled[-200:]
-        X = seq.reshape(1, 200, 1)
-        socketio.emit('log_message', {'message': f'机床{machine_id}推理中...'})
-        pred = fault_model.predict(X)
-        prob = float(pred[0][0])
-        pred_label = 1 if prob > 0.5 else 0
-        msg = f"机床{machine_id}模拟推送数据预测：{'故障' if pred_label==1 else '正常'} (概率 {prob:.2f})，真实标签：{label}"
-        latest_sim_predict[0] = msg
-        socketio.emit('log_message', {'message': f'机床{machine_id}推理完成，结果：{msg}'})
-        emit('sim_predict_result', {'result': msg, 'prob': prob, 'label': int(pred_label), 'true_label': label, 'machine_id': machine_id})
-    except Exception as e:
-        socketio.emit('log_message', {'message': f'机床{machine_id}推理异常: {e}'})
-        emit('sim_predict_result', {'result': f'模拟数据预测出错: {e}', 'machine_id': machine_id})
 
 # ========== 接收模拟信号并自动预测 ==========
 @socketio.on('simulated_signal')
@@ -190,21 +152,27 @@ def handle_simulated_signal(data):
     except Exception as e:
         emit('sim_predict_result', {'result': f'模拟数据预测出错: {e}'})
 
-# 创建一个全局事件循环用于TTS
-tts_loop = None
-tts_thread = None
 
-def init_tts_loop():
-    """初始化TTS事件循环"""
-    global tts_loop, tts_thread
-    tts_loop = asyncio.new_event_loop()
-    tts_thread = threading.Thread(target=start_tts_loop, daemon=True)
-    tts_thread.start()
-
-def start_tts_loop():
-    """在新线程中运行TTS事件循环"""
-    asyncio.set_event_loop(tts_loop)
-    tts_loop.run_forever()
+# ========== TTS 队列与线程 ==========
+tts_queue = queue.Queue()
+def tts_worker():
+    while True:
+        text = tts_queue.get()
+        if text is None:
+            break
+        try:
+            # 每次都新建pyttsx3实例，彻底避免多线程/状态冲突
+            engine = pyttsx3.init()
+            engine.setProperty('rate', TTS_RATE)
+            engine.setProperty('volume', TTS_VOLUME)
+            engine.say(text)
+            engine.runAndWait()
+            del engine
+        except Exception as e:
+            print(f"TTS朗读异常: {e}")
+        tts_queue.task_done()
+tts_thread = threading.Thread(target=tts_worker, daemon=True)
+tts_thread.start()
 
 
 # ========== 通义千问Plus对话API ==========
@@ -242,30 +210,7 @@ def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
         socketio.emit('log_message', {'message': f"AI正在说: {text}"})
-        # 使用自定义事件循环来避免事件循环冲突
-        def _speak():
-            engine.say(text)
-            engine.runAndWait()
-        
-        # 将任务提交到专门的TTS事件循环中执行
-        # 修改: 直接使用已创建的tts_loop，避免在子线程中获取事件循环
-        if tts_loop and threading.active_count() > 1:  # 检查是否有活跃的线程
-            # 使用 call_soon_threadsafe 在 TTS 线程中执行语音播放
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    asyncio.sleep(0), tts_loop  # 使用 run_coroutine_threadsafe
-                )
-                # 等待事件循环执行完毕
-                future.result()
-                # 在事件循环中执行语音
-                tts_loop.call_soon_threadsafe(_speak)
-            except Exception as e:
-                print(f"异步执行出错: {e}")
-                # 如果异步执行失败，则直接在当前线程播放
-                _speak()
-        else:
-            # 如果 tts_loop 还未初始化或线程已死，则在当前线程直接播放
-            _speak()
+        tts_queue.put(text)
     else:
         print("没有内容可朗读")
         socketio.emit('log_message', {'message': "没有内容可朗读"})
@@ -381,6 +326,4 @@ def handle_clear_history():
 if __name__ == "__main__":
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
-    # 初始化TTS事件循环
-    init_tts_loop()
     socketio.run(app, debug=True, host='0.0.0.0')
