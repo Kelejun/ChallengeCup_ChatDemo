@@ -1,40 +1,47 @@
 # 阿里云百炼Paraformer语音识别API封装
-import requests
-import base64
+
+import websocket
 import json
 
-def ali_asr_recognize(audio_base64, apikey, appkey, format="wav", sample_rate=16000):
+def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
     """
-    调用阿里云百炼Paraformer语音识别API。
+    使用WebSocket调用阿里云百炼Paraformer实时语音识别API。
     :param audio_base64: 录音的base64字符串（不含data:前缀）
     :param apikey: 阿里云百炼API Key
-    :param appkey: 阿里云ASR服务appkey
     :param format: 音频格式，默认wav
-    :param sample_rate: 采样率，默认16000
-    :return: 识别文本
+    :param sample_rate: 采样率，默认8000
+    :return: 识别文本或错误信息
     """
-    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/asr/recognition"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {apikey}"
-    }
+    ws_url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+    model_name = "paraformer-realtime-8k-v2"
     payload = {
-        "model": "paraformer-16k-zh",  # 百炼Paraformer中文模型
+        "model": model_name,
         "input": {
             "audio": audio_base64,
             "format": format,
             "sample_rate": sample_rate
-        },
-        "parameters": {
-            "appkey": appkey
         }
     }
-    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    if resp.status_code == 200:
-        data = resp.json()
-        try:
-            return data["output"]["text"]
-        except Exception:
-            return data.get("output", {}).get("text", "[解析ASR回复失败]")
-    else:
-        return f"[ASR API请求失败] {resp.status_code}: {resp.text}"
+    try:
+        ws = websocket.create_connection(ws_url, header=[f"Authorization: Bearer {apikey}"])
+        ws.send(json.dumps(payload))
+        result = ""
+        while True:
+            resp = ws.recv()
+            if not resp:
+                break
+            data = json.loads(resp)
+            # 识别结果通常在output.text字段
+            if "output" in data and "text" in data["output"]:
+                result = data["output"]["text"]
+                break
+            # 错误信息
+            if "code" in data and "message" in data:
+                result = f"[ASR WS错误] {data['code']}: {data['message']}"
+                break
+        ws.close()
+        return result
+    except Exception as e:
+        return f"[ASR WS异常] {e}"
+    except Exception as e:
+        return f"[ASR WS异常] {e}"

@@ -18,9 +18,8 @@ from multiprocessing import Process, Queue, freeze_support
 from multiprocessing.queues import Queue as MPQueue
 
 # ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
-QWEN_API_KEY = ""  # 通义千问API Key
-ALI_ASR_API_KEY = ""  # 阿里云百炼API Key（必填）
-ALI_ASR_APPKEY = ""   # 阿里云ASR服务appkey（必填）
+QWEN_API_KEY = ""  # 通义千问API Key（与阿里云百炼ASR共用）
+ALI_ASR_API_KEY = QWEN_API_KEY  # 阿里云百炼API Key自动同步千问APIKey
 
 # ========== 提前初始化Flask和SocketIO，确保后续所有@socketio.on可用 ==========
 app = Flask(__name__)
@@ -78,8 +77,6 @@ except Exception as e:
 from qwen_api import get_qwen_response
 from ali_asr import ali_asr_recognize
 
-
-
 # ========== 语音识别SocketIO事件 ==========
 @socketio.on('asr_audio')
 def handle_asr_audio(data):
@@ -92,12 +89,18 @@ def handle_asr_audio(data):
         emit('asr_result', {'text': '', 'error': '未收到音频数据'})
         return
     socketio.emit('log_message', {'message': f'[ASR] 收到音频数据，长度: {len(audio_base64)} 字节'})
-    if not ALI_ASR_API_KEY or not ALI_ASR_APPKEY:
-        socketio.emit('log_message', {'message': '[ASR] ASR配置缺失，请检查API Key和AppKey'})
+    if not QWEN_API_KEY:
+        socketio.emit('log_message', {'message': '[ASR] ASR配置缺失，请检查API Key'})
         emit('asr_result', {'text': '', 'error': 'ASR配置缺失'})
         return
     try:
-        text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, appkey=ALI_ASR_APPKEY)
+        asr_model = "paraformer-realtime-8k-v2"  # 可根据实际需求动态配置
+        socketio.emit('log_message', {'message': f'[ASR] 开始识别，模型: {asr_model}'})
+        if asr_model == "paraformer-realtime-8k-v2":
+            # 统一走 ali_asr.py 的 WebSocket实现
+            text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=8000)
+        else:
+            text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=16000)
         if text:
             socketio.emit('log_message', {'message': f'[ASR] 识别成功: {text}'})
         else:
@@ -132,25 +135,33 @@ def handle_simulated_signal(data):
     """
     global latest_sim_predict
     if fault_model is None or scaler is None:
+        socketio.emit('log_message', {'message': '[推理] 模型或归一化器未加载，无法预测'})
         emit('fault_result', {'result': '模型未加载，无法预测'})
         return
     try:
+        socketio.emit('log_message', {'message': '[推理] 开始处理模拟信号...'})
         signal = data.get('signal', None)
         label = data.get('label', '')
         if signal is None or not isinstance(signal, list) or len(signal) < 200:
+            socketio.emit('log_message', {'message': '[推理] 信号数据无效或长度不足200，跳过'})
             emit('fault_result', {'result': '模拟数据长度不足200'})
             return
+        socketio.emit('log_message', {'message': f'[推理] 信号数据加载完成，长度: {len(signal)}'})
         sig_arr = np.array(signal).reshape(-1, 1)
+        socketio.emit('log_message', {'message': '[推理] 数据归一化中...'})
         sig_scaled = scaler.transform(sig_arr).flatten()
         seq = sig_scaled[-200:]
         X = seq.reshape(1, 200, 1)
+        socketio.emit('log_message', {'message': '[推理] 开始模型推理...'})
         pred = fault_model.predict(X)
         prob = float(pred[0][0])
         pred_label = 1 if prob > 0.5 else 0
         msg = f"模拟推送数据预测：{'故障' if pred_label==1 else '正常'} (概率 {prob:.2f})，真实标签：{label}"
         latest_sim_predict[0] = msg
+        socketio.emit('log_message', {'message': f'[推理] 推理完成，结果：{msg}'})
         emit('sim_predict_result', {'result': msg, 'prob': prob, 'label': int(pred_label), 'true_label': label})
     except Exception as e:
+        socketio.emit('log_message', {'message': f'[推理] 推理异常: {e}'})
         emit('sim_predict_result', {'result': f'模拟数据预测出错: {e}'})
 
 
@@ -221,12 +232,15 @@ def get_llm_response(question):
     if len(conversation_history) > 10:
         conversation_history = conversation_history[-10:]
     try:
+        socketio.emit('log_message', {'message': '[API] 正在连接通义千问API...'})
         reply = get_qwen_response(question=prompt, history=conversation_history[:-1], apikey=QWEN_API_KEY)
+        socketio.emit('log_message', {'message': '[API] API响应成功'})
         conversation_history.append({"role": "assistant", "content": reply})
         socketio.emit('ai_response', {'message': reply})
         return reply
     except Exception as e:
         err = f"[通义千问API调用失败] {e}"
+        socketio.emit('log_message', {'message': f'[API] API调用异常: {e}'})
         socketio.emit('ai_response', {'message': err})
         return err
 
