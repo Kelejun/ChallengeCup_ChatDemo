@@ -155,12 +155,19 @@
         const stopButton = document.getElementById('stop-button');
         let currentMessageId = null;
 
-        // 语音识别相关
+        // 语音识别相关（真实PCM WAV录音 + 8k重采样）
         let isRecording = false;
-        let mediaRecorder;
-        let audioChunks = [];
+        let audioContext = null;
+        let sourceNode = null;
+        let processorNode = null;
+        let micStream = null;
+        let recordedBuffers = [];
+        let inputSampleRate = 48000;
+        const TARGET_SAMPLE_RATE = 8000; // 与后端paraformer-realtime-8k-v2匹配
+
         const micButton = document.getElementById('mic-button');
         const micIcon = document.getElementById('mic-icon');
+
         micButton.addEventListener('click', async () => {
             if (!isRecording) {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -168,36 +175,150 @@
                     return;
                 }
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
-                    audioChunks = [];
-                    mediaRecorder.ondataavailable = e => {
-                        if (e.data.size > 0) audioChunks.push(e.data);
+                    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    inputSampleRate = audioContext.sampleRate || 48000;
+                    sourceNode = audioContext.createMediaStreamSource(micStream);
+                    const bufferSize = 4096; // 常见取值：1024/2048/4096
+                    processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                    recordedBuffers = [];
+
+                    processorNode.onaudioprocess = (e) => {
+                        const channelData = e.inputBuffer.getChannelData(0);
+                        recordedBuffers.push(new Float32Array(channelData));
                     };
-                    mediaRecorder.onstop = () => {
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                        // 发送音频数据到后端
-                        const reader = new FileReader();
-                        reader.onload = function() {
-                            const base64Audio = reader.result.split(',')[1];
-                            socket.emit('asr_audio', { audio: base64Audio });
-                        };
-                        reader.readAsDataURL(audioBlob);
-                    };
-                    mediaRecorder.start();
+
+                    sourceNode.connect(processorNode);
+                    // 不连接到destination，避免回放
+                    processorNode.connect(audioContext.destination);
+
                     isRecording = true;
                     micIcon.textContent = '⏹️';
                     micButton.title = '点击停止录音';
+                    addMessage('开始录音（PCM采集中）...', 'log-message', logContainer);
                 } catch (err) {
                     alert('无法访问麦克风: ' + err);
                 }
             } else {
-                mediaRecorder.stop();
+                // 停止录音
                 isRecording = false;
                 micIcon.textContent = '🎤';
                 micButton.title = '语音输入';
+                try {
+                    if (processorNode) {
+                        processorNode.disconnect();
+                    }
+                    if (sourceNode) {
+                        sourceNode.disconnect();
+                    }
+                    if (audioContext) {
+                        // Safari 可能不支持 close 的返回 Promise
+                        try { audioContext.close(); } catch (_) {}
+                    }
+                    if (micStream) {
+                        const tracks = micStream.getTracks();
+                        tracks.forEach(t => t.stop());
+                    }
+                } finally {
+                    // 编码WAV并发送
+                    const merged = mergeBuffers(recordedBuffers);
+                    const resampled = downsampleBuffer(merged, inputSampleRate, TARGET_SAMPLE_RATE);
+                    const wavBuffer = encodeWAV(resampled, TARGET_SAMPLE_RATE);
+                    const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+                    const reader = new FileReader();
+                    reader.onload = function() {
+                        const base64Audio = reader.result.split(',')[1];
+                        socket.emit('asr_audio', { audio: base64Audio });
+                        addMessage('已发送WAV(8kHz/单声道/16-bit PCM)到后端', 'log-message', logContainer);
+                    };
+                    reader.readAsDataURL(blob);
+                }
             }
         });
+
+        function mergeBuffers(buffers) {
+            let totalLength = 0;
+            for (let i = 0; i < buffers.length; i++) {
+                totalLength += buffers[i].length;
+            }
+            const result = new Float32Array(totalLength);
+            let offset = 0;
+            for (let i = 0; i < buffers.length; i++) {
+                result.set(buffers[i], offset);
+                offset += buffers[i].length;
+            }
+            return result;
+        }
+
+        function downsampleBuffer(buffer, inputRate, outRate) {
+            if (outRate === inputRate) {
+                return buffer;
+            }
+            const ratio = inputRate / outRate;
+            const newLength = Math.round(buffer.length / ratio);
+            const result = new Float32Array(newLength);
+            let pos = 0;
+            let lastPos = 0;
+            for (let i = 0; i < newLength; i++) {
+                const nextPos = Math.round((i + 1) * ratio);
+                // 简单均值下采样，减少高频混叠
+                let sum = 0;
+                let count = 0;
+                for (let j = lastPos; j < nextPos && j < buffer.length; j++) {
+                    sum += buffer[j];
+                    count++;
+                }
+                result[i] = count > 0 ? (sum / count) : 0;
+                lastPos = nextPos;
+            }
+            return result;
+        }
+
+        function encodeWAV(samples, sampleRate) {
+            const numChannels = 1;
+            const bytesPerSample = 2; // 16-bit
+            const blockAlign = numChannels * bytesPerSample;
+            const byteRate = sampleRate * blockAlign;
+
+            const dataLength = samples.length * bytesPerSample;
+            const buffer = new ArrayBuffer(44 + dataLength);
+            const view = new DataView(buffer);
+
+            // RIFF header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataLength, true);
+            writeString(view, 8, 'WAVE');
+            // fmt  chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+            view.setUint16(20, 1, true);  // AudioFormat (1 for PCM)
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, 16, true); // BitsPerSample
+            // data chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataLength, true);
+
+            // PCM samples
+            floatTo16BitPCM(view, 44, samples);
+            return buffer;
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function floatTo16BitPCM(view, offset, input) {
+            for (let i = 0; i < input.length; i++, offset += 2) {
+                let s = Math.max(-1, Math.min(1, input[i]));
+                s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                view.setInt16(offset, s, true);
+            }
+        }
         // 监听后端返回的语音识别结果
         socket.on('asr_result', (data) => {
             if (data && data.text) {

@@ -16,10 +16,15 @@ import os
 from typing import Optional
 from multiprocessing import Process, Queue, freeze_support
 from multiprocessing.queues import Queue as MPQueue
+import dashscope
 
 # ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
 QWEN_API_KEY = ""  # 通义千问API Key（与阿里云百炼ASR共用）
 ALI_ASR_API_KEY = QWEN_API_KEY  # 阿里云百炼API Key自动同步千问APIKey
+
+# 统一设置DashScope API Key（SDK建议使用环境变量/全局变量任一方式）
+os.environ['DASHSCOPE_API_KEY'] = ALI_ASR_API_KEY
+dashscope.api_key = ALI_ASR_API_KEY
 
 # ========== 提前初始化Flask和SocketIO，确保后续所有@socketio.on可用 ==========
 app = Flask(__name__)
@@ -94,13 +99,9 @@ def handle_asr_audio(data):
         emit('asr_result', {'text': '', 'error': 'ASR配置缺失'})
         return
     try:
-        asr_model = "paraformer-realtime-8k-v2"  # 可根据实际需求动态配置
-        socketio.emit('log_message', {'message': f'[ASR] 开始识别，模型: {asr_model}'})
-        if asr_model == "paraformer-realtime-8k-v2":
-            # 统一走 ali_asr.py 的 WebSocket实现
-            text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=8000)
-        else:
-            text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=16000)
+        asr_model = "paraformer-realtime-8k-v2"
+        socketio.emit('log_message', {'message': f'[ASR] 开始识别，模型: {asr_model}，采样率: 8000Hz，目标格式: wav'})
+        text = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=8000)
         if text:
             socketio.emit('log_message', {'message': f'[ASR] 识别成功: {text}'})
         else:
