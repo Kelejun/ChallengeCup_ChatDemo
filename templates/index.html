@@ -8,23 +8,25 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
+            margin: 0;
+            padding: 16px;
             background-color: #f5f5f5;
         }
         .container {
             background-color: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            max-width: 960px;
+            margin: 0 auto;
         }
         h1 {
             text-align: center;
             color: #333;
         }
         #chat-container {
-            height: 300px;
+            height: 48vh; /* 视口相对高度，便于小屏阅读 */
+            min-height: 220px;
             border: 1px solid #ddd;
             border-radius: 5px;
             padding: 10px;
@@ -33,7 +35,8 @@
             background-color: #fafafa;
         }
         #log-container {
-            height: 100px;
+            height: 22vh;
+            min-height: 120px;
             border: 1px solid #ddd;
             border-radius: 5px;
             padding: 10px;
@@ -83,10 +86,13 @@
         #input-container {
             display: flex;
             gap: 10px;
+            row-gap: 10px;
+            flex-wrap: wrap; /* 小屏自动换行 */
+            align-items: stretch;
             margin-bottom: 10px;
         }
         #message-input {
-            flex: 1;
+            flex: 1 1 260px; /* 允许收缩与换行 */
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 5px;
@@ -142,15 +148,91 @@
         #stop-button:hover {
             background-color: #d32f2f;
         }
+        /* 顶部历史加载小字按钮样式（去除粘顶，保留分割线与加载态） */
+        .history-top {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            justify-content: center;
+            padding-top: 4px;
+            margin-bottom: 8px;
+        }
+        .history-top::before,
+        .history-top::after {
+            content: "";
+            flex: 1 1;
+            height: 1px;
+            background: #e0e0e0;
+        }
+        .history-top .link-btn {
+            background: none;
+            border: none;
+            color: #777;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: color .15s ease, background-color .15s ease;
+        }
+        .history-top .link-btn:hover { color: #555; }
+        .history-top .link-btn:focus-visible { outline: 2px solid #b3d4fc; outline-offset: 2px; }
+        .history-top .link-btn[disabled] { color: #bbb; cursor: default; }
+        .history-top .link-btn .spinner {
+            width: 12px; height: 12px;
+            border: 2px solid #bbb; border-top-color: #777;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            display: none;
+        }
+        .history-top .link-btn.loading .spinner { display: inline-block; }
+        .history-top .link-btn.loading .label { opacity: .85; }
+        @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+    /* 当日志隐藏时，聊天区自动占用释放的高度（默认断点） */
+    .logs-hidden #chat-container { height: calc(48vh + 22vh); }
+
+        /* 响应式：中小屏优化布局与字号 */
+        @media (max-width: 1024px) {
+            .container { max-width: 92vw; }
+            #chat-container { height: 50vh; }
+            #log-container { height: 24vh; }
+            .logs-hidden #chat-container { height: calc(50vh + 24vh); }
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 12px; }
+            .container { border-radius: 10px; padding: 12px; }
+            h1 { font-size: 22px; }
+            #message-input { font-size: 15px; }
+            #send-button, #mic-button, #stop-button, #toggle-log-button { font-size: 15px; }
+            .message { font-size: 15px; }
+            #chat-container { height: 48vh; }
+            #log-container { height: 22vh; }
+            .logs-hidden #chat-container { height: calc(48vh + 22vh); }
+        }
+
+        @media (max-width: 480px) {
+            #message-input { flex-basis: 100%; }
+            #send-button, #mic-button, #stop-button { flex: 1 1 calc(33% - 6px); min-width: 90px; }
+            #toggle-log-button { width: 100%; }
+            .message { font-size: 14px; }
+            .message.chat .timestamp { font-size: 11px; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>数控机床AI语音助手</h1>
-        <div id="chat-container"></div>
-        <div>
-            <div class="section-title" id="log-title">系统日志:</div>
-            <div id="log-container"></div>
+        <div id="chat-container">
+            <div id="history-sentinel" class="history-top">
+                <button id="load-history" class="link-btn" title="加载更早的对话">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span class="label">加载更多历史</span>
+                </button>
+            </div>
         </div>
         <div id="input-container">
             <input type="text" id="message-input" placeholder="请输入你的问题..." autocomplete="off">
@@ -160,7 +242,21 @@
             <button id="send-button">发送</button>
             <button id="stop-button">停止思考</button>
         </div>
-    <button id="toggle-log-button">显示日志</button>
+        <!-- 日志开关按钮与日志区域移动到页面最下方 -->
+        <div style="margin: 8px 0;">
+            <button id="toggle-log-button">显示日志</button>
+        </div>
+        <div>
+            <div class="section-title" id="log-title">系统日志:</div>
+            <div id="log-container">
+                <div id="history-sentinel-log" class="history-top">
+                    <button id="load-history-log" class="link-btn" title="加载更早的日志">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span class="label">加载更多历史</span>
+                    </button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -173,7 +269,13 @@
         const sendButton = document.getElementById('send-button');
     const toggleLogButton = document.getElementById('toggle-log-button');
         const stopButton = document.getElementById('stop-button');
-        let currentMessageId = null;
+    let currentMessageId = null;
+    // 复合历史游标：{ date: 'YYYY-MM-DD', offset: number }，为空表示从最新开始
+    let historyCursor = null;
+    // 历史是否已经读尽
+    let historyDone = false;
+    // 历史条目去重集（只用于历史加载，避免重复 prepend）
+    const historySeen = new Set();
 
         // 语音识别相关（真实PCM WAV录音 + 8k重采样）
         let isRecording = false;
@@ -188,9 +290,10 @@
         const micButton = document.getElementById('mic-button');
         const micIcon = document.getElementById('mic-icon');
 
-    // 默认隐藏系统日志（包括标题与内容）
+    // 默认隐藏系统日志（包括标题与内容），并让聊天区扩展填充高度
     logContainer.style.display = 'none';
     if (logTitle) logTitle.style.display = 'none';
+    document.body.classList.add('logs-hidden');
 
     micButton.addEventListener('click', async () => {
             if (!isRecording) {
@@ -427,12 +530,21 @@
             }
         });
 
-        // 切换显示/隐藏系统日志（包含标题）
+        // 切换显示/隐藏系统日志（包含标题），并动态调整页面高度占比
         toggleLogButton.addEventListener('click', () => {
             const isHidden = (logContainer.style.display === 'none');
             logContainer.style.display = isHidden ? 'block' : 'none';
             if (logTitle) logTitle.style.display = isHidden ? 'block' : 'none';
             toggleLogButton.textContent = isHidden ? '隐藏日志' : '显示日志';
+            if (isHidden) {
+                document.body.classList.remove('logs-hidden');
+            } else {
+                document.body.classList.add('logs-hidden');
+            }
+            // 滚动到聊天区底部，避免切换时视图跳动
+            setTimeout(() => {
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }, 0);
         });
 
         stopButton.addEventListener('click', () => {
@@ -483,6 +595,163 @@
             if (level === 'warning') cls = 'message log-message';
             if (level === 'error') cls = 'message log-message';
             addMessage(`[系统警报][${level}] ${msg}`, 'log-message', logContainer);
+        });
+
+        // 历史日志：将一批 items 插入到容器顶部
+        function prependHistoryItems(items) {
+            // items: [{ts, kind: 'user'|'ai'|'log', text}]
+            const makeNode = (it) => {
+                if (it.kind === 'user') {
+                    const div = document.createElement('div');
+                    div.className = 'message user-message chat';
+                    const textSpan = document.createElement('span');
+                    textSpan.className = 'message-text';
+                    textSpan.textContent = it.text;
+                    const tsSpan = document.createElement('span');
+                    tsSpan.className = 'timestamp';
+                    tsSpan.textContent = it.ts || '';
+                    div.appendChild(textSpan);
+                    div.appendChild(tsSpan);
+                    return { node: div, container: chatContainer };
+                } else if (it.kind === 'ai') {
+                    const div = document.createElement('div');
+                    div.className = 'message ai-message chat';
+                    const textSpan = document.createElement('span');
+                    textSpan.className = 'message-text';
+                    textSpan.textContent = it.text;
+                    const tsSpan = document.createElement('span');
+                    tsSpan.className = 'timestamp';
+                    tsSpan.textContent = it.ts || '';
+                    div.appendChild(textSpan);
+                    div.appendChild(tsSpan);
+                    return { node: div, container: chatContainer };
+                } else {
+                    const div = document.createElement('div');
+                    div.className = 'message log-message';
+                    const tsSpan = document.createElement('span');
+                    tsSpan.className = 'timestamp';
+                    tsSpan.textContent = it.ts || '';
+                    const textSpan = document.createElement('span');
+                    textSpan.className = 'message-text';
+                    textSpan.textContent = it.text;
+                    div.appendChild(tsSpan);
+                    div.appendChild(textSpan);
+                    return { node: div, container: logContainer };
+                }
+            };
+
+            // 记录滚动高度以便保持视口位置
+            const chatOldHeight = chatContainer.scrollHeight;
+            const logOldHeight = logContainer.scrollHeight;
+
+            // 服务端返回为最新在前（倒序），为了在顶部插入后仍保持整体倒序，
+            // 需要从数组末尾开始插入（先插入较旧的）。
+            for (let i = items.length - 1; i >= 0; i--) {
+                const it = items[i];
+                const { node, container } = makeNode(it);
+                if (container === chatContainer) {
+                    const sentinel = document.getElementById('history-sentinel');
+                    if (sentinel && sentinel.parentNode === container) {
+                        container.insertBefore(node, sentinel.nextSibling);
+                    } else {
+                        container.insertBefore(node, container.firstChild);
+                    }
+                } else if (container === logContainer) {
+                    const sentinelLog = document.getElementById('history-sentinel-log');
+                    if (sentinelLog && sentinelLog.parentNode === container) {
+                        container.insertBefore(node, sentinelLog.nextSibling);
+                    } else {
+                        container.insertBefore(node, container.firstChild);
+                    }
+                } else {
+                    container.insertBefore(node, container.firstChild);
+                }
+            }
+
+            // 尝试把滚动位置保持在原来内容处（简单处理，不追求像素级）
+            chatContainer.scrollTop = chatContainer.scrollHeight - chatOldHeight;
+            logContainer.scrollTop = logContainer.scrollHeight - logOldHeight;
+        }
+
+        // 绑定“加载更多历史”按钮（聊天顶部 + 日志顶部）
+        const loadHistoryBtn = document.getElementById('load-history');
+        const loadHistoryBtnLog = document.getElementById('load-history-log');
+
+        function setHistoryLoading(loading) {
+            const btns = [loadHistoryBtn, loadHistoryBtnLog];
+            for (const b of btns) {
+                if (!b) continue;
+                if (historyDone) {
+                    b.disabled = true;
+                    b.classList.remove('loading');
+                } else {
+                    b.disabled = !!loading;
+                    b.classList.toggle('loading', !!loading);
+                }
+            }
+        }
+
+        function setHistoryDone() {
+            historyDone = true;
+            const btns = [loadHistoryBtn, loadHistoryBtnLog];
+            for (const b of btns) {
+                if (!b) continue;
+                b.disabled = true;
+                b.classList.remove('loading');
+                const label = b.querySelector('.label');
+                if (label) label.textContent = '没有更多了';
+            }
+        }
+
+        function requestHistory() {
+            if (historyDone) {
+                addMessage('[历史] 没有更多了', 'log-message', logContainer);
+                return;
+            }
+            setHistoryLoading(true);
+            socket.emit('load_history', { cursor: historyCursor, limit: 100 });
+        }
+
+        if (loadHistoryBtn) loadHistoryBtn.addEventListener('click', requestHistory);
+        if (loadHistoryBtnLog) loadHistoryBtnLog.addEventListener('click', requestHistory);
+
+        socket.on('history_chunk', (data) => {
+            if (!data) return;
+            if (data.error) {
+                addMessage(`[历史] 读取失败：${data.error}`, 'log-message', logContainer);
+                // 清除 loading 状态，防止按钮“消失”
+                setHistoryLoading(false);
+                return;
+            }
+            // 先更新游标（即便本批没有新增可见项，也要推进，以免重复）
+            if ('next_cursor' in data) {
+                historyCursor = data.next_cursor;
+            }
+
+            const items = (data.items || []).filter(it => {
+                // 基于 kind|ts|text 的简单去重键
+                const key = `${it.kind}|${it.ts || ''}|${it.text || ''}`;
+                if (historySeen.has(key)) return false;
+                historySeen.add(key);
+                return true;
+            });
+            if (items.length === 0) {
+                if (data && data.has_more === false) {
+                    addMessage('[历史] 没有更多了', 'log-message', logContainer);
+                } else {
+                    addMessage('[历史] 已跳过重复记录', 'log-message', logContainer);
+                }
+            } else {
+                prependHistoryItems(items);
+                const dateInfo = (data && data.date) ? data.date : (historyCursor && historyCursor.date) || '';
+                addMessage(`[历史] 加载 ${items.length} 条${dateInfo ? `（起始 ${dateInfo}）` : ''}`, 'log-message', logContainer);
+            }
+            // 请求完成，解除 loading 态（若已读尽则保持禁用）
+            if (data && data.has_more === false) {
+                setHistoryDone();
+            } else {
+                setHistoryLoading(false);
+            }
         });
 
         // 添加初始欢迎消息

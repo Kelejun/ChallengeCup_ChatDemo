@@ -31,6 +31,28 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
+# ========== 日志持久化：写入 log/YYYY-MM-DD.log，并广播到前端 ==========
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, 'log')
+
+def log(msg: str):
+    """将日志写入按日期分文件的 log 目录，并通过 SocketIO 广播到前端。"""
+    try:
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR, exist_ok=True)
+        now = datetime.now()
+        ts = now.strftime('%Y-%m-%d %H:%M:%S')
+        file_path = os.path.join(LOG_DIR, f"{now.strftime('%Y-%m-%d')}.log")
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception as e:
+        # 文件写入失败不影响运行，打印到控制台
+        print(f"[LOG WRITE FAIL] {e}: {msg}")
+    try:
+        socketio.emit('log_message', {'message': msg})
+    except Exception as e:
+        print(f"[LOG EMIT FAIL] {e}: {msg}")
+
 # ========== 故障预测模型相关 ========== 
 import numpy as np
 import tensorflow as tf
@@ -90,24 +112,24 @@ def handle_asr_audio(data):
     """
     audio_base64 = data.get('audio', None)
     if not audio_base64:
-        socketio.emit('log_message', {'message': '[ASR] 未收到音频数据'})
+        log('[ASR] 未收到音频数据')
         emit('asr_result', {'text': '', 'error': '未收到音频数据'})
         return
-    socketio.emit('log_message', {'message': f'[ASR] 收到音频数据，长度: {len(audio_base64)} 字节'})
+    log(f'[ASR] 收到音频数据，长度: {len(audio_base64)} 字节')
     if not QWEN_API_KEY:
-        socketio.emit('log_message', {'message': '[ASR] ASR配置缺失，请检查API Key'})
+        log('[ASR] ASR配置缺失，请检查API Key')
         emit('asr_result', {'text': '', 'error': 'ASR配置缺失'})
         return
     try:
         asr_model = "paraformer-realtime-8k-v2"
-        socketio.emit('log_message', {'message': f'[ASR] 开始识别，模型: {asr_model}，采样率: 8000Hz，目标格式: wav'})
+        log(f'[ASR] 开始识别，模型: {asr_model}，采样率: 8000Hz，目标格式: wav')
         result = ali_asr_recognize(audio_base64, apikey=ALI_ASR_API_KEY, format="wav", sample_rate=8000)
 
         # 结构化结果处理
         if isinstance(result, dict):
             if result.get('ok'):
                 text = result.get('text', '')
-                socketio.emit('log_message', {'message': f'[ASR] 识别成功: {text}'})
+                log(f'[ASR] 识别成功: {text}')
                 emit('asr_result', {'text': text})
             else:
                 code = result.get('code', 'UNKNOWN')
@@ -121,25 +143,25 @@ def handle_asr_audio(data):
                     'RESULT_SERIALIZE_ERROR': 'ASR 结果解析失败'
                 }.get(code, 'ASR 未知错误')
 
-                socketio.emit('log_message', {'message': f'[ASR] {friendly} (code={code})'})
+                log(f'[ASR] {friendly} (code={code})')
                 # 追加诊断信息到日志（不回传给输入框）
                 if detail is not None:
                     try:
-                        socketio.emit('log_message', {'message': f"[ASR] 诊断: {json.dumps(detail, ensure_ascii=False)}"})
+                        log(f"[ASR] 诊断: {json.dumps(detail, ensure_ascii=False)}")
                     except Exception:
-                        socketio.emit('log_message', {'message': f"[ASR] 诊断: {detail}"})
+                        log(f"[ASR] 诊断: {detail}")
                 emit('asr_result', {'text': '', 'error': friendly, 'code': code})
         else:
             # 兼容老返回（字符串）
             text = str(result) if result is not None else ''
             if text:
-                socketio.emit('log_message', {'message': f'[ASR] 识别成功: {text}'})
+                log(f'[ASR] 识别成功: {text}')
                 emit('asr_result', {'text': text})
             else:
-                socketio.emit('log_message', {'message': '[ASR] 识别完成，但未返回文本'})
+                log('[ASR] 识别完成，但未返回文本')
                 emit('asr_result', {'text': '', 'error': '识别完成但未返回文本'})
     except Exception as e:
-        socketio.emit('log_message', {'message': f'[ASR] 识别异常: {e}'})
+        log(f'[ASR] 识别异常: {e}')
         emit('asr_result', {'text': '', 'error': str(e)})
 
 # ========== 导入通义千问API封装 ==========
@@ -169,18 +191,23 @@ def _health_check_once():
     global _health_last_state, _health_model_alerted
     try:
         # 巡检开始日志（无论是否有异常，都记录一次开始）
-        socketio.emit('log_message', {'message': '[健康检查] 开始巡检'})
+        log('[健康检查] 开始巡检')
         anomalies = []  # 收集本轮所有异常，用于合并通知AI
         if fault_model is None or scaler is None:
             if not _health_model_alerted:
                 msg = '[健康检查] 模型或归一化器未加载，无法执行巡检'
-                socketio.emit('log_message', {'message': msg})
-                socketio.emit('system_alert', {
+                log(msg)
+                _payload = {
                     'level': 'error',
                     'code': 'MODEL_NOT_READY',
                     'message': '模型未加载，自动健康检查不可用，请检查服务配置',
                     'ts': time.time()
-                })
+                }
+                socketio.emit('system_alert', _payload)
+                try:
+                    log(f"[系统警报][payload] {json.dumps(_payload, ensure_ascii=False)}")
+                except Exception:
+                    log(f"[系统警报][payload] {_payload}")
                 _health_model_alerted = True
                 anomalies.append({
                     'type': 'MODEL_NOT_READY',
@@ -194,11 +221,10 @@ def _health_check_once():
                 except Exception:
                     pass
             # 巡检结束日志（模型未就绪）
-            socketio.emit('log_message', {'message': '[健康检查] 巡检结束（模型未就绪）'})
+            log('[健康检查] 巡检结束（模型未就绪）')
             return
 
-        import scipy.io
-        import random
+        import scipy.io, random
         normal = scipy.io.loadmat('97.mat')["X097_DE_time"].flatten()
         fault = scipy.io.loadmat('105.mat')["X105_DE_time"].flatten()
         for machine_id in range(1, 4):
@@ -221,15 +247,20 @@ def _health_check_once():
             prev = _health_last_state.get(machine_id, False)
             if is_fault and not prev:
                 alert_msg = f'警报：机床{machine_id} 检测到可能故障 (概率 {prob:.2f})，请及时检修'
-                socketio.emit('log_message', {'message': f'[健康检查] {alert_msg}'})
-                socketio.emit('system_alert', {
+                log(f'[健康检查] {alert_msg}')
+                _payload = {
                     'level': 'warning',
                     'code': 'PREDICTED_FAULT',
                     'machine_id': machine_id,
                     'prob': prob,
                     'message': alert_msg,
                     'ts': time.time()
-                })
+                }
+                socketio.emit('system_alert', _payload)
+                try:
+                    log(f"[系统警报][payload] {json.dumps(_payload, ensure_ascii=False)}")
+                except Exception:
+                    log(f"[系统警报][payload] {_payload}")
                 anomalies.append({
                     'type': 'PREDICTED_FAULT',
                     'source': '健康检查-预测故障',
@@ -243,16 +274,16 @@ def _health_check_once():
         if anomalies:
             try:
                 threading.Thread(target=_notify_ai_for_anomalies, args=(anomalies,), daemon=True).start()
-                socketio.emit('log_message', {'message': f'[健康检查] 已合并{len(anomalies)}条异常提交AI建议'})
-            except Exception as _:
+                log(f'[健康检查] 已合并{len(anomalies)}条异常提交AI建议')
+            except Exception:
                 pass
             # 巡检结束日志（发现异常）
-            socketio.emit('log_message', {'message': f'[健康检查] 巡检结束（发现 {len(anomalies)} 条异常）'})
+            log(f'[健康检查] 巡检结束（发现 {len(anomalies)} 条异常）')
         else:
             # 巡检结束日志（无异常）
-            socketio.emit('log_message', {'message': '[健康检查] 巡检结束（无异常）'})
+            log('[健康检查] 巡检结束（无异常）')
     except Exception as e:
-        socketio.emit('log_message', {'message': f'[健康检查] 异常: {e}'})
+        log(f'[健康检查] 异常: {e}')
 
 def _health_check_loop():
     # 首次延迟2分钟，给模型加载与服务稳定留时间；之后每5分钟巡检一次
@@ -271,7 +302,7 @@ def _notify_ai_for_anomalies(anomalies: list):
     """后台线程：合并异常，向AI提交一次问题，获取建议并播报。"""
     try:
         if not QWEN_API_KEY:
-            socketio.emit('log_message', {'message': '[健康检查] AI通知未发送：缺少通义千问API Key'})
+            log('[健康检查] AI通知未发送：缺少通义千问API Key')
             return
         # 构造简要多异常摘要
         lines = []
@@ -289,7 +320,7 @@ def _notify_ai_for_anomalies(anomalies: list):
                 lines.append(f"- [来源:{src}] {msg}")
         summary = "\n".join(lines)
         plural = '多条异常' if len(anomalies) > 1 else '异常'
-        socketio.emit('log_message', {'message': f'[健康检查] 已向AI提交{plural}，请求应对建议...'})
+        log(f'[健康检查] 已向AI提交{plural}，请求应对建议...')
         question = (
             "系统健康检查检测到以下异常：\n" + summary + "\n"
             "请以机床运维专家的角度，用简洁中文给出风险评估（低/中/高），"
@@ -299,7 +330,7 @@ def _notify_ai_for_anomalies(anomalies: list):
         reply = get_llm_response(question)
         speak_text(reply)
     except Exception as e:
-        socketio.emit('log_message', {'message': f'[健康检查] 向AI发送异常通知失败: {e}'})
+        log(f'[健康检查] 向AI发送异常通知失败: {e}')
 
 # ========== 接收模拟信号并自动预测 ==========
 @socketio.on('simulated_signal')
@@ -309,33 +340,33 @@ def handle_simulated_signal(data):
     """
     global latest_sim_predict
     if fault_model is None or scaler is None:
-        socketio.emit('log_message', {'message': '[推理] 模型或归一化器未加载，无法预测'})
+        log('[推理] 模型或归一化器未加载，无法预测')
         emit('fault_result', {'result': '模型未加载，无法预测'})
         return
     try:
-        socketio.emit('log_message', {'message': '[推理] 开始处理模拟信号...'})
+        log('[推理] 开始处理模拟信号...')
         signal = data.get('signal', None)
         label = data.get('label', '')
         if signal is None or not isinstance(signal, list) or len(signal) < 200:
-            socketio.emit('log_message', {'message': '[推理] 信号数据无效或长度不足200，跳过'})
+            log('[推理] 信号数据无效或长度不足200，跳过')
             emit('fault_result', {'result': '模拟数据长度不足200'})
             return
-        socketio.emit('log_message', {'message': f'[推理] 信号数据加载完成，长度: {len(signal)}'})
+        log(f'[推理] 信号数据加载完成，长度: {len(signal)}')
         sig_arr = np.array(signal).reshape(-1, 1)
-        socketio.emit('log_message', {'message': '[推理] 数据归一化中...'})
+        log('[推理] 数据归一化中...')
         sig_scaled = scaler.transform(sig_arr).flatten()
         seq = sig_scaled[-200:]
         X = seq.reshape(1, 200, 1)
-        socketio.emit('log_message', {'message': '[推理] 开始模型推理...'})
+        log('[推理] 开始模型推理...')
         pred = fault_model.predict(X)
         prob = float(pred[0][0])
         pred_label = 1 if prob > 0.5 else 0
         msg = f"模拟推送数据预测：{'故障' if pred_label==1 else '正常'} (概率 {prob:.2f})，真实标签：{label}"
         latest_sim_predict[0] = msg
-        socketio.emit('log_message', {'message': f'[推理] 推理完成，结果：{msg}'})
+        log(f'[推理] 推理完成，结果：{msg}')
         emit('sim_predict_result', {'result': msg, 'prob': prob, 'label': int(pred_label), 'true_label': label})
     except Exception as e:
-        socketio.emit('log_message', {'message': f'[推理] 推理异常: {e}'})
+        log(f'[推理] 推理异常: {e}')
         emit('sim_predict_result', {'result': f'模拟数据预测出错: {e}'})
 
 
@@ -406,16 +437,24 @@ def get_llm_response(question):
     if len(conversation_history) > 10:
         conversation_history = conversation_history[-10:]
     try:
-        socketio.emit('log_message', {'message': '[API] 正在连接通义千问API...'})
+        log('[API] 正在连接通义千问API...')
         reply = get_qwen_response(question=prompt, history=conversation_history[:-1], apikey=QWEN_API_KEY)
-        socketio.emit('log_message', {'message': '[API] API响应成功'})
+        log('[API] API响应成功')
         conversation_history.append({"role": "assistant", "content": reply})
         socketio.emit('ai_response', {'message': reply})
+        try:
+            log(f"AI: {reply}")
+        except Exception:
+            pass
         return reply
     except Exception as e:
         err = f"[通义千问API调用失败] {e}"
-        socketio.emit('log_message', {'message': f'[API] API调用异常: {e}'})
+        log(f'[API] API调用异常: {e}')
         socketio.emit('ai_response', {'message': err})
+        try:
+            log(f"AI: {err}")
+        except Exception:
+            pass
         return err
 
 
@@ -423,14 +462,14 @@ def get_llm_response(question):
 def speak_text(text):
     if text and text.strip():
         print(f"AI正在说: {text}")
-        socketio.emit('log_message', {'message': f"AI正在说: {text}"})
+        log(f"AI正在说: {text}")
         # 将文本发送到TTS进程；若进程未启动则尝试降级为本进程朗读
         try:
             # 若TTS进程异常退出，尝试自动重启
             global tts_process
             if tts_process is None or (tts_process is not None and not tts_process.is_alive()):
                 start_tts_process()
-                socketio.emit('log_message', {'message': '[TTS] 子进程已重启'})
+                log('[TTS] 子进程已重启')
             if tts_queue is not None:
                 tts_queue.put(text)
             else:
@@ -444,7 +483,7 @@ def speak_text(text):
             print(f"TTS队列发送失败，降级播放异常: {e}")
     else:
         print("没有内容可朗读")
-        socketio.emit('log_message', {'message': "没有内容可朗读"})
+        log("没有内容可朗读")
 
 
 # ========== Flask 路由 ==========
@@ -476,18 +515,27 @@ def handle_message(data):
             pred_label = 1 if prob > 0.5 else 0
             result_text = f"{'故障' if pred_label==1 else '正常'} (概率 {prob:.2f})，模拟标签：{label}"
             latest_sim_predict[machine_id] = f"机床{machine_id}对话推理：{result_text}"
-            socketio.emit('log_message', {'message': f'机床{machine_id}对话推理完成，结果：{result_text}'})
+            log(f'[推理] 机床{machine_id}对话推理完成，结果：{result_text}')
     except Exception as e:
-        socketio.emit('log_message', {'message': f'对话自动推理异常: {e}'})
+        log(f'对话自动推理异常: {e}')
     user_input = data['message']
     signal = data.get('signal', None)
 
     if not user_input:
-        emit('log_message', {'message': "输入不能为空，请重新输入。"})
+        log("输入不能为空，请重新输入。")
         return
+    # 将用户输入持久化到日志
+    try:
+        log(f"用户: {user_input}")
+    except Exception:
+        pass
 
     if "退出" in user_input or "再见" in user_input:
         emit('ai_response', {'message': "好的，再见！"})
+        try:
+            log("AI: 好的，再见！")
+        except Exception:
+            pass
         speak_text("好的，再见！")
         # 清空对话历史
         global conversation_history
@@ -502,8 +550,12 @@ def handle_message(data):
         thread.start()
     except Exception as e:
         print("程序出错:", e)
-        emit('log_message', {'message': f"程序出错: {e}"})
+        log(f"程序出错: {e}")
         emit('ai_response', {'message': "抱歉，我暂时无法连接服务器。"})
+        try:
+            log("AI: 抱歉，我暂时无法连接服务器。")
+        except Exception:
+            pass
         speak_text("抱歉，我暂时无法连接服务器。")
 
 def process_ai_response(user_input):
@@ -553,22 +605,207 @@ def handle_clear_history():
     conversation_history = []
     emit('history_cleared', {'message': '对话历史已清除'})
 
+# ========== 历史日志加载（跨天连续，基于复合游标 {date, offset} 向前分页） ==========
+@socketio.on('load_history')
+def handle_load_history(data):
+    """
+    请求参数：
+      - cursor: 可选，形如 { 'date': 'YYYY-MM-DD', 'offset': <int> }，表示该日期从文件末尾已读取 offset 行
+      - limit:  本次最多返回的记录条数，默认 100
+
+    行为：
+      - 若未提供 cursor，则自动从最新一天的日志开始向前查找
+      - 会跨越多天，直到凑满 limit 条或没有更早的日志
+
+    返回：
+      - items: [{ts, kind: 'user'|'ai'|'log', text}]
+      - next_cursor: 若还有更多历史，则给出下一次查询用的 {date, offset}；否则为 None
+      - has_more: 是否还有更多历史
+      - date: 为兼容前端旧字段，返回 next_cursor 的 date 或当前起始日期
+    """
+    try:
+        limit = int((data or {}).get('limit') or 100)
+        cursor_in = (data or {}).get('cursor')
+        try:
+            log(f"[历史] 请求: cursor={cursor_in}, limit={limit}")
+        except Exception:
+            pass
+
+        # 列出所有可用日志日期（YYYY-MM-DD.log），升序排列
+        if not os.path.exists(LOG_DIR):
+            emit('history_chunk', {'items': [], 'next_cursor': None, 'has_more': False, 'date': None})
+            return
+        files = [f for f in os.listdir(LOG_DIR) if f.endswith('.log')]
+        dates = []
+        for f in files:
+            name = f[:-4]
+            try:
+                # 验证日期格式
+                datetime.strptime(name, '%Y-%m-%d')
+                dates.append(name)
+            except Exception:
+                continue
+        dates.sort()  # 升序
+        try:
+            log(f"[历史] 可用日期: {dates}")
+        except Exception:
+            pass
+        if not dates:
+            emit('history_chunk', {'items': [], 'next_cursor': None, 'has_more': False, 'date': None})
+            return
+
+        # 确定起始日期与偏移
+        if cursor_in and isinstance(cursor_in, dict) and cursor_in.get('date') in dates:
+            curr_date = cursor_in.get('date')
+            curr_offset = int(cursor_in.get('offset') or 0)
+        else:
+            # 默认从最新日期开始
+            curr_date = dates[-1]
+            curr_offset = 0
+
+        curr_index = dates.index(curr_date)
+        remaining = limit
+        batch_items = []  # 按整体时间从早到晚排序
+        ended_date = curr_date
+        ended_offset = curr_offset
+
+        def parse_line(line: str):
+            ts = ''
+            msg = line
+            if line.startswith('['):
+                try:
+                    idx = line.index(']')
+                    ts = line[1:idx].strip()
+                    msg = line[idx+1:].lstrip()
+                except Exception:
+                    ts = ''
+                    msg = line
+            kind = 'log'
+            text = msg
+            if msg.startswith('用户: '):
+                kind = 'user'
+                text = msg[4:].strip()
+            elif msg.startswith('AI: '):
+                kind = 'ai'
+                text = msg[3:].strip()
+            return {'ts': ts, 'kind': kind, 'text': text}
+
+        while remaining > 0 and curr_index >= 0:
+            file_path = os.path.join(LOG_DIR, f"{dates[curr_index]}.log")
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+            except Exception:
+                # 文件读取异常则跳过该天
+                curr_index -= 1
+                curr_offset = 0
+                continue
+
+            total = len(lines)
+            available = max(0, total - curr_offset)
+            if available <= 0:
+                curr_index -= 1
+                curr_offset = 0
+                continue
+
+            read_count = min(remaining, available)
+            start = max(0, total - curr_offset - read_count)
+            end = max(0, total - curr_offset)
+            chunk = lines[start:end]
+            parsed_chunk = [parse_line(l) for l in chunk]  # 该子块内为按时间从早到晚
+            # 为满足“倒序（最新在前）”需求：将子块反转为从新到旧
+            parsed_chunk_rev = list(reversed(parsed_chunk))
+            try:
+                log(f"[历史] 读取: {dates[curr_index]} 行 {start}:{end}（返回 {len(parsed_chunk_rev)} 条，倒序）")
+            except Exception:
+                pass
+
+            # 整体批次维持从新到旧（按日期从近到远），因此将当前天的倒序子块追加到末尾
+            batch_items = batch_items + parsed_chunk_rev
+
+            curr_offset += read_count
+            ended_date = dates[curr_index]
+            ended_offset = curr_offset
+            remaining -= read_count
+
+            if remaining > 0:
+                # 继续走到更早一天
+                curr_index -= 1
+                curr_offset = 0
+
+        # 判断是否还有更多历史，并给出下一游标
+        has_more = False
+        next_cursor = None
+        if remaining == 0:
+            # 本次已凑满 limit 条
+            try:
+                with open(os.path.join(LOG_DIR, f"{ended_date}.log"), 'r', encoding='utf-8') as f:
+                    total_ended = len(f.read().splitlines())
+            except Exception:
+                total_ended = 0
+            ended_idx = dates.index(ended_date) if ended_date in dates else -1
+            if total_ended - ended_offset > 0:
+                # 同一天仍有未读
+                has_more = True
+                next_cursor = { 'date': ended_date, 'offset': ended_offset }
+            elif ended_idx - 1 >= 0:
+                # 当天已读尽，但仍有更早日期，直接跳转到前一天起点
+                has_more = True
+                prev_date = dates[ended_idx - 1]
+                next_cursor = { 'date': prev_date, 'offset': 0 }
+        else:
+            # 未凑满，说明要么越界（没有更早天），要么已切换到更早一天但尚未读取
+            if curr_index >= 0:
+                has_more = True
+                next_cursor = { 'date': dates[curr_index], 'offset': 0 }
+            else:
+                has_more = False
+                next_cursor = None
+
+        try:
+            log(f"[历史] 返回: items={len(batch_items)}, next_cursor={next_cursor}, has_more={has_more}")
+        except Exception:
+            pass
+        emit('history_chunk', {
+            'items': batch_items,
+            'next_cursor': next_cursor,
+            'has_more': has_more,
+            'date': (next_cursor['date'] if isinstance(next_cursor, dict) else ended_date)
+        })
+    except Exception as e:
+        emit('history_chunk', {
+            'items': [],
+            'error': str(e),
+            'next_cursor': (data.get('cursor') if isinstance(data, dict) else None),
+            'has_more': False,
+            'date': (data.get('cursor', {}).get('date') if isinstance(data, dict) else None)
+        })
+
 # ========== 主程序入口 ==========
 if __name__ == "__main__":
     freeze_support()  # Windows/PyInstaller 兼容
     print("=== 数控机床AI语音助手已启动 ===")
     print("提示：访问 http://localhost:5000 使用网页版")
     debug_flag = True
+    # 服务启动日志
+    try:
+        log('[服务] 启动')
+    except Exception:
+        pass
     # 禁用自动重载器，确保仅运行一次，避免依赖 WERKZEUG_RUN_MAIN
     start_tts_process()
     # 启动后台健康检查线程（守护线程）
     try:
         t = threading.Thread(target=_health_check_loop, daemon=True)
         t.start()
-        socketio.emit('log_message', {'message': '[健康检查] 后台巡检线程已启动'})
+        log('[健康检查] 后台巡检线程已启动')
     except Exception as e:
-        socketio.emit('log_message', {'message': f'[健康检查] 启动失败: {e}'})
+        log(f'[健康检查] 启动失败: {e}')
     try:
         socketio.run(app, debug=debug_flag, host='0.0.0.0', use_reloader=False)
     finally:
+        try:
+            log('[服务] 停止')
+        except Exception:
+            pass
         stop_tts_process()
