@@ -13,13 +13,29 @@ except ImportError:
 
 def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
     """
-    使用阿里云DashScope官方Python SDK（Recognition类，同步调用）进行识别：
-    - 将前端上传的base64音频写入临时文件
-    - 使用 Recognition.call(file=...) 同步识别整段音频
-    - 聚合返回的句子文本
+    使用阿里云DashScope官方Python SDK（Recognition类，同步调用）进行识别。
+
+    输入：
+    - audio_base64: 前端传来的不带 data: 前缀的 Base64 音频（推荐WAV/PCM/8k/mono）
+    - apikey: DashScope API Key
+    - format: 客户端声明的原始格式（用于命名临时文件后缀，实际已做嗅探）
+    - sample_rate: 采样率（默认 8000）
+
+    返回统一结构：
+    {
+        'ok': bool,
+        'text': str,
+        'code': str,            # ASR_OK / SDK_IMPORT_FAIL / INPUT_UNSUPPORTED / SDK_NO_OUTPUT / EXCEPTION / RESULT_SERIALIZE_ERROR
+        'detail': dict|str|None
+    }
     """
     if Recognition is None:
-        return "[ASR SDK未导入成功，请确认已安装dashscope>=1.23并重启Python进程]"
+        return {
+            'ok': False,
+            'text': '',
+            'code': 'SDK_IMPORT_FAIL',
+            'detail': 'dashscope SDK 未导入成功，请安装 dashscope 并重启进程'
+        }
 
     # 预初始化，避免 finally 中引用未定义
     tmp_path = None
@@ -38,17 +54,17 @@ def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
             f.write(audio_bytes)
             tmp_path = f.name
 
-        # 简单格式嗅探：RIFF=WAV，OggS=Ogg容器（opus/speex），EBML=WebM/Matroska
+        # 简单格式嗅探
         header = audio_bytes[:4]
         detected = None
         if header.startswith(b'RIFF'):
             detected = 'wav'
         elif header.startswith(b'OggS'):
-            detected = 'opus'  # OGG容器常见为Opus
-        elif header == b'\x1aE\xDf\xa3' or audio_bytes[:4] == b'\x1a\x45\xdf\xa3':
+            detected = 'opus'
+        elif header == b'\x1aE\xDf\xa3' or header == b'\x1a\x45\xdf\xa3':
             detected = 'webm'
 
-        # 若系统安装了ffmpeg，则统一转码为8kHz、单声道、PCM WAV，提升识别兼容性
+        # 若系统安装了ffmpeg，则统一转码为8kHz、单声道、PCM WAV
         call_path = tmp_path
         call_format = (detected or format or 'wav')
         if has_ffmpeg:
@@ -65,18 +81,21 @@ def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
                 call_path = tmp_wav_path
                 call_format = 'wav'
             except Exception:
-                # 转码失败则回退使用原文件
                 pass
         else:
-            # 无ffmpeg且为webm，SDK不支持；直接返回清晰提示
             if detected == 'webm':
-                return '[ASR 提示] 检测到浏览器录音为WebM/Opus封装，SDK不直接支持。请安装ffmpeg加入PATH，或前端改为PCM WAV 8k 单声道。'
+                return {
+                    'ok': False,
+                    'text': '',
+                    'code': 'INPUT_UNSUPPORTED',
+                    'detail': '检测到WebM/Opus封装且无ffmpeg；请安装ffmpeg或改为PCM WAV(8k/mono)'
+                }
 
-        # 临时设置API Key（同时设置环境变量与dashscope.api_key，兼容不同SDK读取方式）
+        # 设置API Key
         os.environ['DASHSCOPE_API_KEY'] = apikey or ''
         dashscope.api_key = apikey or ''
 
-        # 统一采用实例+回调的方式，兼容更多SDK版本
+        # 统一采用实例+回调的方式
         class _EmptyCallback:
             def on_open(self):
                 pass
@@ -97,7 +116,12 @@ def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
         )
         result = rec.call(file=call_path)
     except Exception as e:
-        return f"[ASR SDK异常] {e}"
+        return {
+            'ok': False,
+            'text': '',
+            'code': 'EXCEPTION',
+            'detail': str(e)
+        }
     finally:
         # 还原API Key
         if prev_key_env is None:
@@ -114,7 +138,7 @@ def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
         except Exception:
             pass
 
-    # 解析结果：优先从 get_sentence() 提取文本（同步可能为list）
+    # 解析结果：优先从 get_sentence() 提取文本
     text_parts = []
     try:
         if hasattr(result, 'get_sentence'):
@@ -131,18 +155,46 @@ def ali_asr_recognize(audio_base64, apikey, format="wav", sample_rate=8000):
 
     final_text = ''.join(text_parts).strip()
     if final_text:
-        return final_text
+        return {
+            'ok': True,
+            'text': final_text,
+            'code': 'ASR_OK',
+            'detail': None
+        }
 
     # 兜底：尽量返回可读信息
     try:
         resp = getattr(result, 'get_response', None)
         if callable(resp):
-            # 附加调试信息（格式、是否转码等）
-            return f"[ASR SDK无输出] format={call_format} sample_rate={sample_rate} ffmpeg={'yes' if has_ffmpeg else 'no'} response={str(resp())}"
+            return {
+                'ok': False,
+                'text': '',
+                'code': 'SDK_NO_OUTPUT',
+                'detail': {
+                    'format': call_format,
+                    'sample_rate': sample_rate,
+                    'ffmpeg': bool(has_ffmpeg),
+                    'response': str(resp())
+                }
+            }
     except Exception:
         pass
     try:
-        # 某些版本 RecognitionResult 可直接 str 化得到JSON，附加调试信息
-        return f"[ASR SDK无输出] format={call_format} sample_rate={sample_rate} ffmpeg={'yes' if has_ffmpeg else 'no'} result={str(result)}"
+        return {
+            'ok': False,
+            'text': '',
+            'code': 'SDK_NO_OUTPUT',
+            'detail': {
+                'format': call_format,
+                'sample_rate': sample_rate,
+                'ffmpeg': bool(has_ffmpeg),
+                'result': str(result)
+            }
+        }
     except Exception as e:
-        return f"[ASR SDK返回不可序列化] {e}"
+        return {
+            'ok': False,
+            'text': '',
+            'code': 'RESULT_SERIALIZE_ERROR',
+            'detail': str(e)
+        }

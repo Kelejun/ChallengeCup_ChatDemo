@@ -50,7 +50,7 @@
         }
         .user-message {
             background-color: #e3f2fd;
-            text-align: right;
+            text-align: left;
         }
         .ai-message {
             background-color: #f1f8e9;
@@ -60,6 +60,25 @@
             margin-bottom: 5px;
             padding: 5px;
             border-radius: 3px;
+        }
+        /* 聊天消息内嵌时间戳：右下角小字 */
+        .message.chat {
+            position: relative;
+            padding-bottom: 20px; /* 给时间戳留空间 */
+        }
+        .message.chat .timestamp {
+            position: absolute;
+            right: 8px;
+            bottom: 4px;
+            font-size: 12px;
+            color: #888;
+            opacity: 0.9;
+        }
+        /* 日志时间戳：前缀小字 */
+        .log-message .timestamp {
+            color: #999;
+            font-size: 12px;
+            margin-right: 6px;
         }
         #input-container {
             display: flex;
@@ -98,7 +117,7 @@
             margin-bottom: 5px;
             color: #333;
         }
-        #clear-button {
+        #toggle-log-button {
             padding: 8px 15px;
             background-color: #ff9800;
             color: white;
@@ -107,7 +126,7 @@
             cursor: pointer;
             font-size: 14px;
         }
-        #clear-button:hover {
+        #toggle-log-button:hover {
             background-color: #f57c00;
         }
         #stop-button {
@@ -130,7 +149,7 @@
         <h1>数控机床AI语音助手</h1>
         <div id="chat-container"></div>
         <div>
-            <div class="section-title">系统日志:</div>
+            <div class="section-title" id="log-title">系统日志:</div>
             <div id="log-container"></div>
         </div>
         <div id="input-container">
@@ -141,17 +160,18 @@
             <button id="send-button">发送</button>
             <button id="stop-button">停止思考</button>
         </div>
-        <button id="clear-button">清空对话历史</button>
+    <button id="toggle-log-button">显示日志</button>
     </div>
 
     <script>
         // 必须先声明socket，后续所有事件才能正常工作
         const socket = io();
         const chatContainer = document.getElementById('chat-container');
-        const logContainer = document.getElementById('log-container');
+    const logContainer = document.getElementById('log-container');
+    const logTitle = document.getElementById('log-title');
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
-        const clearButton = document.getElementById('clear-button');
+    const toggleLogButton = document.getElementById('toggle-log-button');
         const stopButton = document.getElementById('stop-button');
         let currentMessageId = null;
 
@@ -168,7 +188,11 @@
         const micButton = document.getElementById('mic-button');
         const micIcon = document.getElementById('mic-icon');
 
-        micButton.addEventListener('click', async () => {
+    // 默认隐藏系统日志（包括标题与内容）
+    logContainer.style.display = 'none';
+    if (logTitle) logTitle.style.display = 'none';
+
+    micButton.addEventListener('click', async () => {
             if (!isRecording) {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                     alert('当前浏览器不支持录音功能');
@@ -330,10 +354,39 @@
         });
 
         function addMessage(message, className, container) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${className}`;
-            messageDiv.textContent = message;
-            container.appendChild(messageDiv);
+            const wrapper = document.createElement('div');
+            wrapper.className = `message ${className}`;
+            const now = new Date();
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mm = String(now.getMinutes()).padStart(2, '0');
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            const ts = `${hh}:${mm}:${ss}`;
+
+            const tsSpan = document.createElement('span');
+            tsSpan.className = 'timestamp';
+            tsSpan.textContent = ts;
+
+            if (className.includes('user-message') || className.includes('ai-message')) {
+                // 聊天气泡：文本 + 右下角时间戳
+                wrapper.classList.add('chat');
+                const textSpan = document.createElement('span');
+                textSpan.className = 'message-text';
+                textSpan.textContent = message;
+                wrapper.appendChild(textSpan);
+                wrapper.appendChild(tsSpan);
+            } else if (className.includes('log-message')) {
+                // 日志：时间戳前缀 + 文本
+                wrapper.appendChild(tsSpan);
+                const textSpan = document.createElement('span');
+                textSpan.className = 'message-text';
+                textSpan.textContent = message;
+                wrapper.appendChild(textSpan);
+            } else {
+                // 兜底：简单拼接
+                wrapper.textContent = `[${ts}] ${message}`;
+            }
+
+            container.appendChild(wrapper);
             container.scrollTop = container.scrollHeight;
         }
 
@@ -356,7 +409,9 @@
         sendButton.addEventListener('click', () => {
             const message = messageInput.value.trim();
             if (message) {
-                addMessage('你: ' + message, 'user-message', chatContainer);
+                addMessage(message, 'user-message', chatContainer);
+                // 同步将用户消息写入系统日志
+                addMessage('用户: ' + message, 'log-message', logContainer);
                 currentMessageId = Date.now().toString(); // 生成唯一ID
                 socket.emit('send_message', {message: message, id: currentMessageId});
                 messageInput.value = '';
@@ -372,8 +427,12 @@
             }
         });
 
-        clearButton.addEventListener('click', () => {
-            socket.emit('clear_history');
+        // 切换显示/隐藏系统日志（包含标题）
+        toggleLogButton.addEventListener('click', () => {
+            const isHidden = (logContainer.style.display === 'none');
+            logContainer.style.display = isHidden ? 'block' : 'none';
+            if (logTitle) logTitle.style.display = isHidden ? 'block' : 'none';
+            toggleLogButton.textContent = isHidden ? '隐藏日志' : '显示日志';
         });
 
         stopButton.addEventListener('click', () => {
@@ -385,7 +444,7 @@
 
         socket.on('ai_response', (data) => {
             removeTypingIndicator();
-            addMessage('AI助手: ' + data.message, 'ai-message', chatContainer);
+            addMessage(data.message, 'ai-message', chatContainer);
             sendButton.disabled = false;
             stopButton.style.display = 'none';
             currentMessageId = null;
@@ -413,11 +472,21 @@
             logContainer.innerHTML = '';
             addMessage(data.message, 'log-message', logContainer);
             // 可选：添加初始欢迎消息
-            addMessage('AI助手: 你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
+            addMessage('你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
+        });
+
+        // 接收后端健康检查的系统警报
+        socket.on('system_alert', (data) => {
+            const level = (data && data.level) || 'info';
+            const msg = data && data.message ? data.message : '[系统警报] 未知告警';
+            let cls = 'log-message';
+            if (level === 'warning') cls = 'message log-message';
+            if (level === 'error') cls = 'message log-message';
+            addMessage(`[系统警报][${level}] ${msg}`, 'log-message', logContainer);
         });
 
         // 添加初始欢迎消息
-        addMessage('AI助手: 你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
+        addMessage('你好！我是数控机床AI语音助手，请输入你的问题。', 'ai-message', chatContainer);
     </script>
 </body>
 </html>
