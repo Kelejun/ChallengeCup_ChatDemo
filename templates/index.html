@@ -572,7 +572,7 @@
 
         socket.on('generation_stopped', (data) => {
             removeTypingIndicator();
-            addMessage('AI助手: [思考已中断]', 'ai-message', chatContainer);
+            addMessage('[思考已中断]', 'ai-message', chatContainer);
             sendButton.disabled = false;
             stopButton.style.display = 'none';
             currentMessageId = null;
