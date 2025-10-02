@@ -88,15 +88,79 @@ def get_qwen_response(question, history=None, apikey=None, model="qwen-plus", ca
             "messages": messages
         }
     }
+    def _extract_text(data: dict) -> str:
+        if not isinstance(data, dict):
+            return ""
+        # 优先从 output 中解析
+        out = data.get("output")
+        if isinstance(out, dict):
+            # 直接 text 字段
+            txt = out.get("text")
+            if isinstance(txt, str) and txt.strip():
+                return txt
+            # message.content
+            msg = out.get("message")
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
+                if isinstance(content, list):
+                    # 兼容多段内容
+                    parts = []
+                    for p in content:
+                        if isinstance(p, dict):
+                            parts.append(p.get("text") or p.get("content") or "")
+                        elif isinstance(p, str):
+                            parts.append(p)
+                    joined = ''.join([x for x in parts if x])
+                    if joined.strip():
+                        return joined
+            # choices[0].message.content / choices[0].content / choices[0].text
+            chs = out.get("choices")
+            if isinstance(chs, list) and chs:
+                top = chs[0]
+                if isinstance(top, dict):
+                    cand = (
+                        (isinstance(top.get("message"), dict) and top.get("message", {}).get("content"))
+                        or top.get("content") or top.get("text")
+                    )
+                    if isinstance(cand, str) and cand.strip():
+                        return cand
+        # 顶层 choices 兜底
+        chs = data.get("choices")
+        if isinstance(chs, list) and chs:
+            top = chs[0]
+            if isinstance(top, dict):
+                cand = (
+                    (isinstance(top.get("message"), dict) and top.get("message", {}).get("content"))
+                    or top.get("content") or top.get("text")
+                )
+                if isinstance(cand, str) and cand.strip():
+                    return cand
+        # 其它可能字段
+        for k in ("text", "output_text", "result"):
+            v = data.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
+
     try:
         resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
     except Exception as e:
         return f"[通义千问API请求失败] {e}"
     if resp.status_code == 200:
-        data = resp.json()
         try:
-            return data["output"]["text"]
+            data = resp.json()
         except Exception:
-            return data.get("output", {}).get("text", "[解析AI回复失败]")
+            return f"[通义千问API请求失败] 返回非JSON：{resp.text[:200]}"
+        txt = _extract_text(data)
+        return txt if txt else "[解析AI回复失败]"
     else:
-        return f"[通义千问API请求失败] {resp.status_code}: {resp.text}"
+        # 若返回体含错误码/错误信息，尽量抽取
+        try:
+            err = resp.json()
+            code = err.get('code') or err.get('error_code') or resp.status_code
+            msg = err.get('message') or err.get('error_msg') or resp.text
+            return f"[通义千问API请求失败] {code}: {msg}"
+        except Exception:
+            return f"[通义千问API请求失败] {resp.status_code}: {resp.text}"

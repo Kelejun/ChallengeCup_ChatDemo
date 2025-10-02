@@ -135,19 +135,7 @@
         #toggle-log-button:hover {
             background-color: #f57c00;
         }
-        #stop-button {
-            padding: 10px 20px;
-            background-color: #f44336;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;
-            display: none;
-        }
-        #stop-button:hover {
-            background-color: #d32f2f;
-        }
+        /* 停止思考按钮已移除 */
         /* 顶部历史加载小字按钮样式（去除粘顶，保留分割线与加载态） */
         .history-top {
             display: flex;
@@ -207,7 +195,7 @@
             .container { border-radius: 10px; padding: 12px; }
             h1 { font-size: 22px; }
             #message-input { font-size: 15px; }
-            #send-button, #mic-button, #stop-button, #toggle-log-button { font-size: 15px; }
+            #send-button, #mic-button, #toggle-log-button { font-size: 15px; }
             .message { font-size: 15px; }
             #chat-container { height: 48vh; }
             #log-container { height: 22vh; }
@@ -216,7 +204,7 @@
 
         @media (max-width: 480px) {
             #message-input { flex-basis: 100%; }
-            #send-button, #mic-button, #stop-button { flex: 1 1 calc(33% - 6px); min-width: 90px; }
+            #send-button, #mic-button { flex: 1 1 calc(33% - 6px); min-width: 90px; }
             #toggle-log-button { width: 100%; }
             .message { font-size: 14px; }
             .message.chat .timestamp { font-size: 11px; }
@@ -240,7 +228,6 @@
                 <span id="mic-icon">🎤</span>
             </button>
             <button id="send-button">发送</button>
-            <button id="stop-button">停止思考</button>
         </div>
         <!-- 日志开关按钮与日志区域移动到页面最下方 -->
         <div style="margin: 8px 0;">
@@ -268,8 +255,7 @@
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
     const toggleLogButton = document.getElementById('toggle-log-button');
-        const stopButton = document.getElementById('stop-button');
-    let currentMessageId = null;
+        // 停止思考功能已移除
     // 复合历史游标：{ date: 'YYYY-MM-DD', offset: number }，为空表示从最新开始
     let historyCursor = null;
     // 历史是否已经读尽
@@ -515,11 +501,9 @@
                 addMessage(message, 'user-message', chatContainer);
                 // 同步将用户消息写入系统日志
                 addMessage('用户: ' + message, 'log-message', logContainer);
-                currentMessageId = Date.now().toString(); // 生成唯一ID
-                socket.emit('send_message', {message: message, id: currentMessageId});
+                socket.emit('send_message', {message: message});
                 messageInput.value = '';
                 sendButton.disabled = true;
-                stopButton.style.display = 'block';
                 addTypingIndicator();
             }
         });
@@ -547,19 +531,13 @@
             }, 0);
         });
 
-        stopButton.addEventListener('click', () => {
-            if (currentMessageId) {
-                socket.emit('stop_generation', {id: currentMessageId});
-                stopButton.style.display = 'none';
-            }
-        });
+        // 停止思考按钮已移除
 
         socket.on('ai_response', (data) => {
             removeTypingIndicator();
             addMessage(data.message, 'ai-message', chatContainer);
             sendButton.disabled = false;
-            stopButton.style.display = 'none';
-            currentMessageId = null;
+            // 停止思考流程已移除
         });
 
         socket.on('ai_response_update', (data) => {
@@ -570,13 +548,7 @@
             addMessage(data.message, 'log-message', logContainer);
         });
 
-        socket.on('generation_stopped', (data) => {
-            removeTypingIndicator();
-            addMessage('[思考已中断]', 'ai-message', chatContainer);
-            sendButton.disabled = false;
-            stopButton.style.display = 'none';
-            currentMessageId = null;
-        });
+        // generation_stopped 监听已移除
 
         socket.on('history_cleared', (data) => {
             // 清空聊天区和日志区

@@ -20,7 +20,7 @@ import dashscope
 from queue import Empty
 
 # ========== 配置区：通义千问Plus & 阿里云ASR API Key ==========
-QWEN_API_KEY = ""  # 通义千问API Key（与阿里云百炼ASR共用）
+QWEN_API_KEY = "sk-40b1955e53a8453eb646798a50bd632e"  # 通义千问API Key（与阿里云百炼ASR共用）
 ALI_ASR_API_KEY = QWEN_API_KEY  # 阿里云百炼API Key自动同步千问APIKey
 
 # 统一设置DashScope API Key（SDK建议使用环境变量/全局变量任一方式）
@@ -181,11 +181,6 @@ received_response = False
 conversation_history = []
 # 存储最近一次模拟推送的预测结果
 latest_sim_predict = {}  # {machine_id: 推理结果字符串}
-
-# ========== 生成中断管理（软取消） ==========
-# 记录每条消息ID对应的取消事件，用于“停止思考”软中断（不再向前端回传或播报该轮回复）
-_active_generations = {}  # {message_id: threading.Event}
-_active_gen_lock = threading.Lock()
 
 # ========== 后台健康检查（每5分钟） ==========
 _health_last_state = {
@@ -432,7 +427,7 @@ def stop_tts_process():
 
 
 # ========== 通义千问Plus对话API ==========
-def get_llm_response(question, suppress_emit: bool = False, cancel_event: Optional[threading.Event] = None):
+def get_llm_response(question):
     global conversation_history
     # 汇总所有机床的最新推理结果
     if latest_sim_predict:
@@ -452,30 +447,23 @@ def get_llm_response(question, suppress_emit: bool = False, cancel_event: Option
         conversation_history = conversation_history[-10:]
     try:
         log('[API] 正在连接通义千问API...')
-        reply = get_qwen_response(question=prompt, history=conversation_history[:-1], apikey=QWEN_API_KEY, cancel_event=cancel_event)
+        reply = get_qwen_response(question=prompt, history=conversation_history[:-1], apikey=QWEN_API_KEY, streaming=False)
         log('[API] API响应成功')
-        # 若已被请求中断，直接返回，不做推送或追加历史
-        if cancel_event is not None and cancel_event.is_set():
-            return reply
         conversation_history.append({"role": "assistant", "content": reply})
-        if not suppress_emit:
-            socketio.emit('ai_response', {'message': reply})
-            try:
-                log(f"AI: {reply}")
-            except Exception:
-                pass
+        socketio.emit('ai_response', {'message': reply})
+        try:
+            log(f"AI: {reply}")
+        except Exception:
+            pass
         return reply
     except Exception as e:
         err = f"[通义千问API调用失败] {e}"
         log(f'[API] API调用异常: {e}')
-        if cancel_event is not None and cancel_event.is_set():
-            return err
-        if not suppress_emit:
-            socketio.emit('ai_response', {'message': err})
-            try:
-                log(f"AI: {err}")
-            except Exception:
-                pass
+        socketio.emit('ai_response', {'message': err})
+        try:
+            log(f"AI: {err}")
+        except Exception:
+            pass
         return err
 
 
@@ -540,8 +528,6 @@ def handle_message(data):
     except Exception as e:
         log(f'对话自动推理异常: {e}')
     user_input = data['message']
-    # 记录消息ID以支持软中断
-    message_id = data.get('id')
     signal = data.get('signal', None)
 
     if not user_input:
@@ -569,12 +555,7 @@ def handle_message(data):
 
     try:
         # 在新线程中处理AI响应，避免阻塞WebSocket
-        # 为本次消息创建取消事件，并登记到活动表
-        cancel_evt = threading.Event()
-        if message_id:
-            with _active_gen_lock:
-                _active_generations[message_id] = cancel_evt
-        thread = threading.Thread(target=process_ai_response, args=(user_input, message_id, cancel_evt))
+        thread = threading.Thread(target=process_ai_response, args=(user_input,))
         thread.start()
     except Exception as e:
         print("程序出错:", e)
@@ -586,22 +567,9 @@ def handle_message(data):
             pass
         speak_text("抱歉，我暂时无法连接服务器。")
 
-def process_ai_response(user_input, message_id: Optional[str], cancel_event: Optional[threading.Event]):
-    # 抑制内部推送，返回后根据取消状态决定是否发送
-    ai_reply = get_llm_response(user_input, suppress_emit=True, cancel_event=cancel_event)
-    try:
-        if cancel_event is not None and cancel_event.is_set():
-            return
-        socketio.emit('ai_response', {'message': ai_reply})
-        try:
-            log(f"AI: {ai_reply}")
-        except Exception:
-            pass
-        speak_text(ai_reply)
-    finally:
-        if message_id:
-            with _active_gen_lock:
-                _active_generations.pop(message_id, None)
+def process_ai_response(user_input):
+    ai_reply = get_llm_response(user_input)
+    speak_text(ai_reply)
 
 
 # ========== 故障预测 SocketIO 事件 ==========
@@ -634,24 +602,7 @@ def handle_predict_fault(data):
         emit('fault_result', {'result': f'预测出错: {e}'})
 
 
-# ========== 停止思考（软中断） ==========
-@socketio.on('stop_generation')
-def handle_stop_generation(data):
-    try:
-        message_id = (data or {}).get('id')
-        if not message_id:
-            return
-        with _active_gen_lock:
-            evt = _active_generations.get(message_id)
-        if evt is not None:
-            try:
-                evt.set()
-            except Exception:
-                pass
-        emit('generation_stopped', {'id': message_id})
-        log(f"[中断] 已请求停止思考，id={message_id}")
-    except Exception as e:
-        log(f"[中断] 处理停止思考异常: {e}")
+# （已移除停止思考事件处理）
 
 # 添加清除历史记录的路由
 @app.route('/clear_history', methods=['POST'])
